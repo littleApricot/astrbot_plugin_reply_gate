@@ -413,6 +413,42 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.reply_calls), 1)
         self.assertEqual(event.get_extra("reply_gate_decision")["source"], "mention")
 
+    async def test_mention_without_text_passes_real_empty_message_guard(self):
+        e = make_event("   ", mention=True)
+        e.message_obj.message = [At(qq="bot-1")]
+        original_chain = copy.deepcopy(e.get_messages())
+        await self.plugin.observe_message(e)
+        self.assertTrue(e.message_str.strip())
+        self.assertEqual(e.get_messages(), original_chain)
+        stage = InternalAgentSubStage()
+        stage.streaming_response = False
+        stage.show_reasoning = False
+        waiting = AsyncMock(return_value=True)
+        with (
+            patch(
+                "astrbot.core.pipeline.process_stage.method.agent_sub_stages.internal.try_capture_follow_up",
+                return_value=None,
+            ),
+            patch(
+                "astrbot.core.pipeline.process_stage.method.agent_sub_stages.internal.call_event_hook",
+                waiting,
+            ),
+        ):
+            async for _ in stage.process(e, ""):
+                pass
+        waiting.assert_awaited_once_with(e, EventType.OnWaitingLLMRequestEvent)
+        self.config["bailian_api_key"] = ""
+        await self.dispatch(e)
+        self.assertEqual(self.requests, [])
+        self.assertEqual(len(self.reply_calls), 1)
+        self.assertEqual(e.get_extra("reply_gate_decision")["source"], "mention")
+
+    async def test_empty_mentions_of_others_are_not_fabricated(self):
+        e = make_event("")
+        e.message_obj.message = [At(qq="someone-else")]
+        await self.plugin.observe_message(e)
+        self.assertEqual(e.message_str, "")
+
     async def test_allowed_reply_keeps_full_context_and_saved_history(self):
         event = make_event()
         self.histories[event.unified_msg_origin] = [

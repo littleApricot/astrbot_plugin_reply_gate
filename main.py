@@ -10,7 +10,7 @@ from sys import maxsize
 import aiohttp
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import At
+from astrbot.api.message_components import At, Plain
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
 from astrbot.core.agent.message import Message, dump_messages_with_checkpoints
@@ -47,6 +47,23 @@ class ReplyGate(Star):
         if event.get_sender_id() == event.get_self_id():
             event.stop_event()
             return
+        parts = event.get_messages()
+        if (
+            not (event.message_str or "").strip()
+            and any(
+                isinstance(part, At) and str(part.qq) == str(event.get_self_id())
+                for part in parts
+            )
+            and all(
+                isinstance(part, At)
+                or isinstance(part, Plain)
+                and not part.text.strip()
+                for part in parts
+            )
+        ):
+            # AstrBot skips mention-only messages before constructing a request.
+            # Describe the actual interaction so the normal history builder runs.
+            event.message_str = "[用户仅 @ 了你，没有附加文字]"
         event.set_extra("reply_gate_candidate", True)
         # This also makes the built-in probability responder defer, so it cannot
         # bypass the decision or start a second response for the same message.
@@ -67,6 +84,7 @@ class ReplyGate(Star):
             for part in event.get_messages()
         ):
             event.set_extra("reply_gate_decision", {"reply": True, "source": "mention"})
+            self.logger.info("Reply gate: reply=True source=mention")
             return
         if not event.get_extra("reply_gate_candidate", False):
             return
