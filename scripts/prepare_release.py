@@ -34,7 +34,7 @@ def main() -> None:
                 "schema_version": 1,
                 "name": "littleApricot AstrBot Plugins",
                 "version": version,
-                "description": "回复判断与群聊表情图库发布源",
+                "description": "littleApricot AstrBot 插件发布源",
                 "repository": repo,
             },
             "littleApricot/astrbot_plugin_reply_gate": {

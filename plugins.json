@@ -3,7 +3,7 @@
     "schema_version": 1,
     "name": "littleApricot AstrBot Plugins",
     "version": "v0.4.0",
-    "description": "回复判断与群聊表情图库发布源",
+    "description": "littleApricot AstrBot 插件发布源",
     "repository": "https://github.com/littleApricot/astrbot_plugin_reply_gate"
   },
   "littleApricot/astrbot_plugin_reply_gate": {
@@ -24,6 +24,16 @@
     "version": "v0.1.0",
     "repo": "https://github.com/littleApricot/astrbot_plugin_meme_library",
     "download_url": "https://github.com/littleApricot/astrbot_plugin_meme_library/archive/refs/tags/v0.1.0.zip",
+    "astrbot_version": ">=4.29.1,<4.30.0"
+  },
+  "littleApricot/astrbot_plugin_self_prompt": {
+    "author": "littleApricot",
+    "name": "astrbot_plugin_self_prompt",
+    "display_name": "自维护提示词",
+    "desc": "让机器人按人设、输出偏好和其他记忆三个部分读取并修改当前人格提示词。",
+    "version": "v0.1.0",
+    "repo": "https://github.com/littleApricot/astrbot_plugin_self_prompt",
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_self_prompt/archive/refs/tags/v0.1.0.zip",
     "astrbot_version": ">=4.29.1,<4.30.0"
   }
 }
