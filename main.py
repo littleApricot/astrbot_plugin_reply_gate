@@ -210,6 +210,9 @@ class ReplyGate(Star):
                     "reply_provider_missing",
                     "reply_provider_has_no_vision",
                     "invalid_vision_decision",
+                    "empty_vision_decision",
+                    "invalid_vision_json",
+                    "invalid_vision_schema",
                 }
                 else (
                     str(exc)
