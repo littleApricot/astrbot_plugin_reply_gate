@@ -30,10 +30,10 @@
     "author": "littleApricot",
     "name": "astrbot_plugin_self_prompt",
     "display_name": "自维护提示词",
-    "desc": "让机器人按人设、输出偏好和其他记忆三个部分读取并修改当前人格提示词。",
-    "version": "v0.1.0",
+    "desc": "机器人可编辑人设、输出偏好和记忆，每累计 100 条聊天消息自动整理一次。",
+    "version": "v0.2.0",
     "repo": "https://github.com/littleApricot/astrbot_plugin_self_prompt",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_self_prompt/archive/refs/tags/v0.1.0.zip",
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_self_prompt/archive/refs/tags/v0.2.0.zip",
     "astrbot_version": ">=4.29.1,<4.30.0"
   }
 }
