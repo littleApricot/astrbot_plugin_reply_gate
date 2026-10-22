@@ -2,7 +2,7 @@
   "$meta": {
     "schema_version": 1,
     "name": "littleApricot AstrBot Plugins",
-    "version": "v0.3.0",
+    "version": "v0.3.1",
     "description": "回复判断插件发布源",
     "repository": "https://github.com/littleApricot/astrbot_plugin_reply_gate"
   },
@@ -10,10 +10,10 @@
     "author": "littleApricot",
     "name": "astrbot_plugin_reply_gate",
     "display_name": "回复判断",
-    "desc": "使用阿里云百炼决策模型判断是否回复，@ 直接回复，共享人格、记忆和最近文字对话上下文。",
-    "version": "v0.3.0",
+    "desc": "使用百炼决策模型读取近期上下文判断是否回复，@ 直接回复，正式回复保留 AstrBot 完整上下文。",
+    "version": "v0.3.1",
     "repo": "https://github.com/littleApricot/astrbot_plugin_reply_gate",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_reply_gate/archive/refs/tags/v0.3.0.zip",
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_reply_gate/archive/refs/tags/v0.3.1.zip",
     "astrbot_version": ">=4.29.1,<4.30.0"
   }
 }

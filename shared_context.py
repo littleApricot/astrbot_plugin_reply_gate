@@ -1,4 +1,4 @@
-"""Build one bounded conversation window for both decisions and replies."""
+"""Build a bounded decision window without changing the reply request."""
 
 from __future__ import annotations
 
@@ -17,8 +17,9 @@ GROUP_END = "\n--- END CONTEXT ---"
 RECORD_START = re.compile(r"(?m)(?=^\[[^\]\n]+/\d{2}:\d{2}:\d{2}\]:)")
 
 DEFAULT_INSTRUCTIONS = (
-    "你负责判断群聊机器人此刻是否适合接话。state.messages 是机器人正式回复时使用的"
-    "同一份上下文，包含人格、已有记忆、历史对话和最后一条当前用户消息。"
+    "你负责判断群聊机器人此刻是否适合接话。state.messages 是从正式回复请求中取得的"
+    "近期上下文，包含人格、已有记忆、最近历史对话和最后一条当前用户消息；"
+    "更早的消息可能已省略。"
     "请结合人格、对话对象、话题与最近互动判断：机器人此刻回复是否自然、能接上互动。"
     "回应问候、确认在线、接住玩笑、表达情绪和闲聊互动，本身就是合理的回复目的。"
     "用户在向机器人打招呼、呼唤、询问是否在线、试探是否有反应、追问、邀请互动或"
@@ -36,8 +37,8 @@ class ContextLimitError(ValueError):
 
 
 @dataclass
-class SharedWindow:
-    """The exact initial messages shared by both model calls."""
+class DecisionWindow:
+    """A detached, bounded view used only by the decision model."""
 
     history: list[dict]
     current: dict
@@ -60,11 +61,11 @@ class SharedWindow:
         return prefix + self.history + [self.current]
 
 
-def decision_payload(window: SharedWindow, instructions: str) -> dict[str, Any]:
-    """Represent the shared messages using the System One API.
+def decision_payload(window: DecisionWindow, instructions: str) -> dict[str, Any]:
+    """Represent the decision messages using the System One API.
 
     Args:
-        window: The same messages used by the reply provider.
+        window: Recent messages selected from the full reply request.
         instructions: The editable reply selection policy.
 
     Returns:
@@ -124,7 +125,7 @@ def fit_context(
     instructions: str,
     budget: int,
     prompt_present: bool,
-) -> tuple[SharedWindow, dict[str, Any]]:
+) -> tuple[DecisionWindow, dict[str, Any]]:
     """Drop the oldest dialogue while retaining persona and injected memory.
 
     Args:
@@ -136,7 +137,7 @@ def fit_context(
         prompt_present: Whether the first current text part is the user's prompt.
 
     Returns:
-        A shared window and its matching decision request.
+        A detached decision window and its matching request.
 
     Raises:
         ContextLimitError: Protected content alone exceeds the available window.
@@ -144,9 +145,11 @@ def fit_context(
     """
     if not 2_048 <= budget <= MAX_BUDGET:
         raise ValueError("context_budget_out_of_range")
-    window = SharedWindow(copy.deepcopy(history), copy.deepcopy(current), system_prompt)
+    window = DecisionWindow(
+        copy.deepcopy(history), copy.deepcopy(current), system_prompt
+    )
     # Trimming history cannot make unsupported media in the current turn fit.
-    decision_payload(SharedWindow([], window.current, system_prompt), instructions)
+    decision_payload(DecisionWindow([], window.current, system_prompt), instructions)
     while True:
         try:
             payload = decision_payload(window, instructions)
@@ -182,8 +185,8 @@ def fit_context(
             window.history[first:end] = retained
             continue
 
-        # This endpoint only accepts text. Never let the reply provider see an
-        # image that was replaced or omitted from the decision's shared window.
+        # This endpoint only accepts text. Media is removed from the detached
+        # decision history; the original reply request still retains it.
         if payload is None:
             raise ContextLimitError("unsupported_media")
 

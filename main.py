@@ -13,7 +13,6 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import At
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
-from astrbot.core.agent.context.truncator import ContextTruncator
 from astrbot.core.agent.message import Message, dump_messages_with_checkpoints
 
 from .shared_context import (
@@ -27,7 +26,7 @@ from .shared_context import (
 
 
 class ReplyGate(Star):
-    """Use one shared request window before generating an ordinary reply."""
+    """Judge a bounded copy while preserving the full reply request."""
 
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context, config)
@@ -84,24 +83,8 @@ class ReplyGate(Star):
                 for msg in req.contexts
                 if isinstance(msg, dict) and msg.get("role")
             ]
-            # Apply AstrBot's configured turn limit before deciding, so its
-            # runner does not remove another set of messages after the decision.
-            compression = (
-                self.context.get_config(event.unified_msg_origin)
-                .get("agent_runner", {})
-                .get("config", {})
-                .get("compression", {})
-            )
-            turns = int(compression.get("max_turns", -1))
-            if turns != -1:
-                messages = [Message.model_validate(msg) for msg in history + [current]]
-                bounded = ContextTruncator().truncate_by_turns(
-                    messages,
-                    keep_most_recent_turns=turns,
-                    drop_turns=int(compression.get("trim_turns", 1)),
-                )
-                history = [message.model_dump() for message in bounded[:-1]]
-
+            # Only this detached decision window is trimmed. AstrBot retains
+            # ownership of the original request, context limits and persistence.
             window, payload = fit_context(
                 history,
                 current,
@@ -110,17 +93,6 @@ class ReplyGate(Star):
                 int(self.config.get("context_budget", 60_000)),
                 bool(req.prompt and req.prompt.strip()),
             )
-            req.contexts = window.history
-            req.system_prompt = window.system_prompt
-            req.prompt = None
-            req.image_urls = []
-            req.audio_urls = []
-            req.extra_user_content_parts = window.current["content"]
-            current = window.current
-            if req.conversation:
-                req.conversation = copy.copy(req.conversation)
-                req.conversation.token_usage = 0
-
             key = str(self.config.get("bailian_api_key", "")).strip()
             if not key:
                 raise ValueError("api_key_missing")
@@ -161,7 +133,7 @@ class ReplyGate(Star):
                 },
             )
             self.logger.info(
-                "Reply gate: reply=%s probability=%.4f dropped_messages=%d dropped_group_records=%d shortened_current=%s",
+                "Reply gate: reply=%s probability=%.4f decision_dropped_messages=%d decision_dropped_group_records=%d decision_shortened_current=%s",
                 should_reply,
                 probability,
                 window.dropped_messages,
@@ -215,12 +187,11 @@ class ReplyGate(Star):
             # AstrBot consumes pending group context while assembling a request.
             # Preserve this unsent user turn so the next decision can still see it.
             try:
-                messages = [
-                    Message.model_validate(msg)
-                    for msg in req.contexts + [current]
-                    if msg.get("role") != "system"
-                ]
-                history = dump_messages_with_checkpoints(messages)
+                # Keep existing records (including checkpoints) intact and append
+                # the full current turn, excluding temporary persona/memory parts.
+                history = copy.deepcopy(req.contexts) + dump_messages_with_checkpoints(
+                    [Message.model_validate(current)]
+                )
                 await self.context.conversation_manager.update_conversation(
                     event.unified_msg_origin,
                     req.conversation.cid,

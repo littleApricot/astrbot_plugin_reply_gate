@@ -15,6 +15,9 @@ from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunne
 from astrbot.core.config.default import DEFAULT_CONFIG
 from astrbot.core.pipeline.context import PipelineContext
 from astrbot.core.pipeline.context_utils import call_event_hook
+from astrbot.core.pipeline.process_stage.method.agent_sub_stages.internal import (
+    InternalAgentSubStage,
+)
 from astrbot.core.pipeline.process_stage.stage import ProcessStage, StarRequestSubStage
 from astrbot.core.pipeline.waking_check.stage import WakingCheckStage
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
@@ -25,7 +28,6 @@ from astrbot.core.provider.entities import LLMResponse, ProviderMeta, ProviderRe
 from astrbot.core.provider.provider import Provider
 from astrbot.core.star.star import star_map
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
-
 from astrbot_plugin_reply_gate.main import ReplyGate
 from astrbot_plugin_reply_gate.shared_context import (
     DEFAULT_INSTRUCTIONS,
@@ -68,7 +70,7 @@ class ContextTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             fit_context(history, current, "PERSONA", DEFAULT_INSTRUCTIONS, 65536, True)
 
-    def test_old_media_round_is_removed_from_both_model_contexts(self):
+    def test_old_media_round_is_removed_from_decision_window(self):
         history = [
             {"role": "user", "content": "earlier"},
             {"role": "assistant", "content": "earlier answer"},
@@ -222,6 +224,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.requests = []
         self.reply_calls = []
+        self.prepared_requests = []
+        self.request_snapshots = []
         self.probability = 0.9
         self.status = 200
         self.histories = {}
@@ -253,6 +257,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         self.plugin = ReplyGate(self.context, self.config)
+        self.history_stage = InternalAgentSubStage()
+        self.history_stage.conv_manager = self.context.conversation_manager
         self.metadata = star_map[ReplyGate.__module__]
         self.metadata.name = "astrbot_plugin_reply_gate"
         self.metadata.author = "eeo"
@@ -325,8 +331,12 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             system_prompt="PERSONA: you are a helpful group member.",
             contexts=copy.deepcopy(self.histories.get(event.unified_msg_origin, [])),
             extra_user_content_parts=copy.deepcopy(self.extra_parts),
-            conversation=SimpleNamespace(cid=event.unified_msg_origin, token_usage=0),
+            conversation=SimpleNamespace(
+                cid=event.unified_msg_origin, token_usage=1234
+            ),
         )
+        self.prepared_requests.append(req)
+        self.request_snapshots.append(copy.deepcopy(req))
         if await call_event_hook(event, EventType.OnLLMRequestEvent, req):
             return
         provider = MagicMock(spec=Provider)
@@ -355,6 +365,13 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         )
         async for result in runner.step():
             yield result
+        await self.history_stage._save_to_history(
+            event,
+            req,
+            runner.get_final_llm_resp(),
+            runner.run_context.messages,
+            runner.stats,
+        )
         event.call_llm = True
 
     async def dispatch(self, event):
@@ -371,7 +388,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.reply_calls), 1)
         self.assertEqual(event.get_extra("reply_gate_decision")["source"], "mention")
 
-    async def test_allowed_reply_and_decision_use_same_actual_provider_context(self):
+    async def test_allowed_reply_keeps_full_context_and_saved_history(self):
         event = make_event()
         self.histories[event.unified_msg_origin] = [
             {"role": "user", "content": "OLD" * 2000},
@@ -387,9 +404,52 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision["model"], MODEL)
         self.assertEqual(self.requests[0]["authorization"], "test-only-fake-key")
         actual = reply["contexts"]
-        self.assertEqual(decision["state"]["messages"], actual)
-        self.assertNotIn("OLD", json.dumps(actual))
+        self.assertNotIn("OLD", json.dumps(decision))
+        self.assertIn("recent", json.dumps(decision))
+        self.assertIn("OLD", json.dumps(actual))
         self.assertIn("MEMORY", json.dumps(actual))
+        self.assertEqual(self.prepared_requests[-1], self.request_snapshots[-1])
+        saved = self.histories[event.unified_msg_origin]
+        self.assertEqual(saved[:4], self.request_snapshots[-1].contexts)
+        self.assertEqual(saved[-1]["role"], "assistant")
+        self.assertNotIn("MEMORY", json.dumps(saved))
+
+    async def test_decline_and_http_error_preserve_full_history_and_current_text(self):
+        for mode in ("decline", "http_error"):
+            with self.subTest(mode=mode):
+                self.probability = 0.1
+                self.status = 503 if mode == "http_error" else 200
+                event = make_event(
+                    "CURRENT_START" + "中文" * 3000 + "LATEST", session=mode
+                )
+                original = [
+                    {"role": "user", "content": "OLD" * 2000},
+                    {"role": "assistant", "content": "old answer"},
+                ]
+                self.histories[event.unified_msg_origin] = copy.deepcopy(original)
+                await self.dispatch(event)
+                self.assertTrue(event.is_stopped())
+                self.assertEqual(self.reply_calls, [])
+                saved = self.histories[event.unified_msg_origin]
+                self.assertEqual(saved[:2], original)
+                self.assertIn(event.message_str, json.dumps(saved, ensure_ascii=False))
+                self.assertNotIn(
+                    "Earlier part of this message omitted", json.dumps(saved)
+                )
+                self.assertEqual(self.prepared_requests[-1], self.request_snapshots[-1])
+
+    async def test_group_records_are_trimmed_only_for_decision(self):
+        records = "\n".join(
+            f"[person/12:00:{n:02d}]: record-{n} {'x' * 450}" for n in range(10)
+        )
+        self.extra_parts.append(TextPart(text=GROUP_BEGIN + records + GROUP_END))
+        event = await self.dispatch(make_event())
+        decision = json.dumps(self.requests[-1]["body"])
+        self.assertNotIn("record-0", decision)
+        self.assertIn("record-9", decision)
+        self.assertIn("record-0", json.dumps(self.reply_calls[-1]))
+        self.assertIn("record-0", json.dumps(self.histories[event.unified_msg_origin]))
+        self.assertEqual(self.prepared_requests[-1], self.request_snapshots[-1])
 
     async def test_complete_bearer_authorization_is_not_prefixed_twice(self):
         self.config["bailian_api_key"] = "Bearer test-only-fake-key"
@@ -441,10 +501,10 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         await self.dispatch(make_event("继续聊文字"))
         self.assertEqual(len(self.requests), 1)
         self.assertEqual(len(self.reply_calls), 1)
-        self.assertEqual(
-            self.requests[0]["body"]["state"]["messages"],
-            self.reply_calls[0]["contexts"],
-        )
+        self.assertNotIn("image_url", json.dumps(self.requests[0]["body"]))
+        self.assertIn("image_url", json.dumps(self.reply_calls[0]["contexts"]))
+        saved = self.histories[make_event().unified_msg_origin]
+        self.assertIn("image_url", json.dumps(saved))
 
     async def test_declined_message_is_visible_to_the_next_decision(self):
         self.probability = 0.1

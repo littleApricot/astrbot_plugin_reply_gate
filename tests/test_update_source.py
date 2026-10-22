@@ -22,6 +22,9 @@ class UpdateSourceTests(unittest.IsolatedAsyncioTestCase):
         self.workspace = Path(self.temp.name)
         self.root = Path(__file__).resolve().parents[1]
         self.registry = json.loads((self.root / "plugins.json").read_text())
+        self.version = yaml.safe_load((self.root / "metadata.yaml").read_text())[
+            "version"
+        ]
         buffer = io.BytesIO()
         with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
             for name in [
@@ -69,7 +72,7 @@ class UpdateSourceTests(unittest.IsolatedAsyncioTestCase):
             data, "littleApricot/astrbot_plugin_reply_gate"
         )
         self.assertIsNotNone(entry)
-        self.assertEqual(entry["version"], "v0.3.0")
+        self.assertEqual(entry["version"], self.version)
         self.assertEqual(len(list(self.service.iter_market_plugin_entries(data))), 1)
         updater = _PluginUpdater()
         updater.plugin_store_path = str(self.workspace / "plugins")
@@ -91,7 +94,8 @@ class UpdateSourceTests(unittest.IsolatedAsyncioTestCase):
             (target / "main.py").read_bytes(), (self.root / "main.py").read_bytes()
         )
         self.assertEqual(
-            yaml.safe_load((target / "metadata.yaml").read_text())["version"], "v0.3.0"
+            yaml.safe_load((target / "metadata.yaml").read_text())["version"],
+            self.version,
         )
         self.assertEqual(json.loads(local_config.read_text()), saved)
 
@@ -99,11 +103,11 @@ class UpdateSourceTests(unittest.IsolatedAsyncioTestCase):
         url = self.base + "/plugins.json"
         await self.service.get_online_plugins(custom_registry=url, force_refresh=True)
         self.registry = copy.deepcopy(self.registry)
-        self.registry["littleApricot/astrbot_plugin_reply_gate"]["version"] = "v0.3.1"
+        self.registry["littleApricot/astrbot_plugin_reply_gate"]["version"] = "v9.9.9"
         data, _ = await self.service.get_online_plugins(
             custom_registry=url, force_refresh=False
         )
         entry = self.service.resolve_market_plugin_entry_by_id(
             data, "littleApricot/astrbot_plugin_reply_gate"
         )
-        self.assertEqual(entry["version"], "v0.3.1")
+        self.assertEqual(entry["version"], "v9.9.9")
