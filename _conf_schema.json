@@ -16,7 +16,7 @@
     "type": "string",
     "default": "",
     "secret": true,
-    "hint": "填写百炼控制台参考代码中 Authorization 的完整值，插件原样发送；如果示例带 Bearer 前缀，请一并填写。不要填其他平台的 Key。留空时普通消息保持沉默，@ 仍正常回复。"
+    "hint": "填写百炼控制台参考代码中 Authorization 的完整值，插件原样发送；如果示例带 Bearer 前缀，请一并填写。不要填其他平台的 Key。留空时无法取得判断结果，自动放行给正式回复流程。"
   },
   "reply_threshold": {
     "description": "回复概率阈值",
@@ -43,19 +43,19 @@
   "timeout_seconds": {
     "description": "判断超时秒数",
     "type": "float",
-    "default": 8,
+    "default": 30,
     "slider": {
       "min": 1,
       "max": 30,
       "step": 1
     },
-    "hint": "接口失败、超时或返回无效结果时保持沉默；@ 不调用判断接口。"
+    "hint": "文字判断超时后自动放行给正式回复流程；@ 跳过判断。"
   },
   "vision_timeout_seconds": {
     "description": "含图消息判断超时秒数",
     "type": "float",
     "default": 30,
-    "hint": "含图片消息额外调用当前回复模型判断，使用完整上下文，跳过百炼及文字判断预算。失败或超时保持沉默，@ 仍直接回复。"
+    "hint": "含图片消息额外调用当前回复模型判断，使用完整上下文；超时或无有效结果时自动放行，@ 跳过判断。"
   },
   "decision_instructions": {
     "description": "是否回复的判断规则",

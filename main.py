@@ -72,6 +72,9 @@ class ReplyGate(Star):
             return
 
         current = None
+        started = time.monotonic()
+        decision_source = "request_preparation"
+        timeout = None
         try:
             current = await req.assemble_context()
             instructions = str(
@@ -80,13 +83,15 @@ class ReplyGate(Star):
             if not instructions:
                 instructions = DEFAULT_INSTRUCTIONS
             if has_image(current):
+                decision_source = "reply_model_vision"
+                timeout = float(self.config.get("vision_timeout_seconds", 30))
                 should_reply = await judge_image(
                     self.context,
                     event,
                     req,
                     current,
                     instructions,
-                    float(self.config.get("vision_timeout_seconds", 30)),
+                    timeout,
                 )
                 event.set_extra(
                     "reply_gate_decision",
@@ -100,6 +105,8 @@ class ReplyGate(Star):
                     should_reply,
                 )
             else:
+                decision_source = MODEL
+                timeout = float(self.config.get("timeout_seconds", 30))
                 history = [
                     copy.deepcopy(msg)
                     for msg in req.contexts
@@ -129,9 +136,7 @@ class ReplyGate(Star):
                     # A complete value containing "Bearer " is also accepted as-is.
                     headers={"Authorization": key},
                     json=payload,
-                    timeout=aiohttp.ClientTimeout(
-                        total=float(self.config.get("timeout_seconds", 8))
-                    ),
+                    timeout=aiohttp.ClientTimeout(total=timeout),
                     allow_redirects=False,
                 ) as response:
                     if response.status != 200:
@@ -197,15 +202,27 @@ class ReplyGate(Star):
             )
             event.set_extra(
                 "reply_gate_decision",
-                {"reply": False, "source": "error", "reason": reason},
+                {
+                    "reply": True,
+                    "source": "error_fallback",
+                    "decision_source": decision_source,
+                    "reason": reason,
+                    "elapsed_seconds": time.monotonic() - started,
+                    "timeout_seconds": timeout,
+                },
             )
             now = time.monotonic()
-            if now - self._last_warning.get(reason, -60) >= 60:
+            warning_key = f"{decision_source}:{reason}"
+            if now - self._last_warning.get(warning_key, -60) >= 60:
                 self.logger.warning(
-                    "Reply gate kept silent: %s. Mentions still bypass the gate.",
+                    "Reply gate failed open: reason=%s source=%s elapsed_seconds=%.3f timeout_seconds=%s. Passing the original request to the reply model.",
                     reason,
+                    decision_source,
+                    now - started,
+                    timeout,
                 )
-                self._last_warning[reason] = now
+                self._last_warning[warning_key] = now
+            return
 
         event.stop_event()
         if req.conversation and current is not None:

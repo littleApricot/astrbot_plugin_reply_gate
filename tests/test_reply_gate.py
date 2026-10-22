@@ -1,5 +1,6 @@
 """Exercise real AstrBot dispatch and runner code with a local decision server."""
 
+import asyncio
 import copy
 import json
 import unittest
@@ -28,7 +29,6 @@ from astrbot.core.provider.entities import LLMResponse, ProviderMeta, ProviderRe
 from astrbot.core.provider.provider import Provider
 from astrbot.core.star.star import star_map
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
-
 from astrbot_plugin_reply_gate.main import ReplyGate
 from astrbot_plugin_reply_gate.shared_context import (
     DEFAULT_INSTRUCTIONS,
@@ -439,7 +439,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved[-1]["role"], "assistant")
         self.assertNotIn("MEMORY", json.dumps(saved))
 
-    async def test_decline_and_http_error_preserve_full_history_and_current_text(self):
+    async def test_decline_and_failed_open_preserve_full_history_and_current_text(self):
         for mode in ("decline", "http_error"):
             with self.subTest(mode=mode):
                 self.probability = 0.1
@@ -453,8 +453,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 ]
                 self.histories[event.unified_msg_origin] = copy.deepcopy(original)
                 await self.dispatch(event)
-                self.assertTrue(event.is_stopped())
-                self.assertEqual(self.reply_calls, [])
+                self.assertEqual(event.is_stopped(), mode == "decline")
+                self.assertEqual(len(self.reply_calls), int(mode == "http_error"))
                 saved = self.histories[event.unified_msg_origin]
                 self.assertEqual(saved[:2], original)
                 self.assertIn(event.message_str, json.dumps(saved, ensure_ascii=False))
@@ -494,7 +494,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.config["bailian_api_url"] = ""
         event = await self.dispatch(make_event())
         self.assertEqual(self.requests, [])
-        self.assertEqual(self.reply_calls, [])
+        self.assertEqual(len(self.reply_calls), 1)
         self.assertEqual(
             event.get_extra("reply_gate_decision")["reason"], "api_url_missing"
         )
@@ -543,7 +543,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.context.get_provider_by_id.assert_called_with("explicit-provider")
         self.assertEqual(self.vision_calls[0]["model"], "explicit-model")
 
-    async def test_image_decision_rejection_and_invalid_output_preserve_full_history(
+    async def test_image_rejection_stops_but_invalid_output_passes_full_history(
         self,
     ):
         self.extra_parts.append(
@@ -559,13 +559,13 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 original = [{"role": "user", "content": "OLD" * 3000}]
                 self.histories[e.unified_msg_origin] = copy.deepcopy(original)
                 await self.dispatch(e)
-                self.assertTrue(e.is_stopped())
+                self.assertEqual(e.is_stopped(), value is False)
                 saved = self.histories[e.unified_msg_origin]
                 self.assertEqual(saved[:1], original)
                 self.assertIn("image_url", json.dumps(saved))
                 self.assertEqual(self.prepared_requests[-1], self.request_snapshots[-1])
         self.assertEqual(self.requests, [])
-        self.assertEqual(self.reply_calls, [])
+        self.assertEqual(len(self.reply_calls), 1)
 
     async def test_text_after_an_unanswered_image_can_be_judged(self):
         self.vision_decision = False
@@ -597,40 +597,105 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("MEMORY", saved)
         self.assertEqual(len(self.reply_calls), 1)
 
-    async def test_error_does_not_fall_through_to_normal_reply(self):
+    async def test_http_error_passes_to_normal_reply_and_mentions_still_bypass(self):
         self.status = 503
         event = await self.dispatch(make_event())
-        self.assertTrue(event.is_stopped())
-        self.assertEqual(len(self.requests), 1)
-        self.assertEqual(len(self.reply_calls), 0)
-        await self.dispatch(make_event(mention=True))
+        self.assertFalse(event.is_stopped())
+        self.assertEqual(
+            event.get_extra("reply_gate_decision")["source"], "error_fallback"
+        )
         self.assertEqual(len(self.requests), 1)
         self.assertEqual(len(self.reply_calls), 1)
+        await self.dispatch(make_event(mention=True))
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(len(self.reply_calls), 2)
 
     async def test_missing_key_does_not_send_a_request(self):
         self.config["bailian_api_key"] = ""
         await self.dispatch(make_event())
         self.assertEqual(len(self.requests), 0)
-        self.assertEqual(len(self.reply_calls), 0)
+        self.assertEqual(len(self.reply_calls), 1)
 
     async def test_legacy_platform_key_is_never_sent_to_bailian(self):
         self.config.pop("bailian_api_key")
         self.config["api_key"] = "legacy-test-only-fake-key"
         event = await self.dispatch(make_event())
         self.assertEqual(self.requests, [])
-        self.assertEqual(self.reply_calls, [])
+        self.assertEqual(len(self.reply_calls), 1)
         self.assertEqual(
             event.get_extra("reply_gate_decision")["reason"], "api_key_missing"
         )
 
-    async def test_invalid_output_and_substituted_model_stay_silent(self):
+    async def test_substituted_model_result_is_not_trusted_and_passes(self):
         self.response_body = {
             "model": "multilingual",
             "answers": {"should_reply": {"noul": 0.99}},
         }
         event = await self.dispatch(make_event())
-        self.assertTrue(event.is_stopped())
-        self.assertEqual(len(self.reply_calls), 0)
+        self.assertFalse(event.is_stopped())
+        self.assertEqual(len(self.reply_calls), 1)
+        self.assertEqual(
+            event.get_extra("reply_gate_decision")["source"], "error_fallback"
+        )
+
+    async def test_text_timeout_passes_original_request_once_and_saves_once(self):
+        self.config["timeout_seconds"] = 0.01
+        self.delay = 0.1
+        e = make_event("timeout current")
+        original = [{"role": "user", "content": "OLD" * 3000}]
+        self.histories[e.unified_msg_origin] = copy.deepcopy(original)
+        await self.dispatch(e)
+        self.assertFalse(e.is_stopped())
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(len(self.reply_calls), 1)
+        result = e.get_extra("reply_gate_decision")
+        self.assertEqual(result["source"], "error_fallback")
+        self.assertEqual(result["reason"], "TimeoutError")
+        self.assertEqual(result["decision_source"], MODEL)
+        self.assertEqual(result["timeout_seconds"], 0.01)
+        self.assertEqual(self.prepared_requests[-1], self.request_snapshots[-1])
+        saved = self.histories[e.unified_msg_origin]
+        self.assertEqual(saved[:1], original)
+        self.assertEqual(len(saved), 3)
+        self.context.conversation_manager.update_conversation.assert_awaited_once()
+
+    async def test_invalid_or_empty_decision_result_passes(self):
+        for index, body in enumerate(
+            [{}, {"answers": {}}, {"answers": {"should_reply": {"noul": None}}}]
+        ):
+            with self.subTest(body=body):
+                self.response_body = body
+                e = await self.dispatch(make_event(session=str(index)))
+                self.assertFalse(e.is_stopped())
+                self.assertEqual(
+                    e.get_extra("reply_gate_decision")["source"], "error_fallback"
+                )
+        self.assertEqual(len(self.reply_calls), 3)
+
+    async def test_vision_timeout_passes_but_cancellation_still_cancels(self):
+        self.extra_parts.append(
+            ImageURLPart(
+                image_url=ImageURLPart.ImageURL(url="data:image/png;base64,dGVzdA==")
+            )
+        )
+        self.vision_provider.text_chat.side_effect = TimeoutError()
+        e = await self.dispatch(make_event("image timeout"))
+        self.assertFalse(e.is_stopped())
+        self.assertEqual(len(self.reply_calls), 1)
+        self.assertEqual(
+            e.get_extra("reply_gate_decision")["decision_source"], "reply_model_vision"
+        )
+        self.assertEqual(self.prepared_requests[-1], self.request_snapshots[-1])
+        self.vision_provider.text_chat.side_effect = asyncio.CancelledError()
+        cancelled = make_event("cancelled", session="cancelled")
+        cancelled.set_extra("reply_gate_candidate", True)
+        req = ProviderRequest(
+            prompt="cancelled", extra_user_content_parts=copy.deepcopy(self.extra_parts)
+        )
+        with self.assertRaises(asyncio.CancelledError):
+            await self.plugin.select_reply(cancelled, req)
+        self.assertTrue(cancelled.is_stopped())
+        self.assertEqual(len(self.reply_calls), 1)
 
     async def test_histories_are_isolated_by_conversation(self):
         self.probability = 0.1

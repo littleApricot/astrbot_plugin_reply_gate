@@ -74,7 +74,10 @@ class UpdateSourceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNotNone(entry)
         self.assertEqual(entry["version"], self.version)
-        self.assertEqual(len(list(self.service.iter_market_plugin_entries(data))), 2)
+        self.assertEqual(
+            len(list(self.service.iter_market_plugin_entries(data))),
+            len(self.registry) - 1,
+        )
         updater = _PluginUpdater()
         updater.plugin_store_path = str(self.workspace / "plugins")
         target = Path(updater.plugin_store_path) / "astrbot_plugin_reply_gate"
