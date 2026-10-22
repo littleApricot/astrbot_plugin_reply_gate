@@ -23,6 +23,7 @@ from .shared_context import (
     fit_context,
     parse_probability,
 )
+from .vision_gate import has_image, judge_image
 
 
 class ReplyGate(Star):
@@ -78,68 +79,89 @@ class ReplyGate(Star):
             ).strip()
             if not instructions:
                 instructions = DEFAULT_INSTRUCTIONS
-            history = [
-                copy.deepcopy(msg)
-                for msg in req.contexts
-                if isinstance(msg, dict) and msg.get("role")
-            ]
-            # Only this detached decision window is trimmed. AstrBot retains
-            # ownership of the original request, context limits and persistence.
-            window, payload = fit_context(
-                history,
-                current,
-                req.system_prompt,
-                instructions,
-                int(self.config.get("context_budget", 60_000)),
-                bool(req.prompt and req.prompt.strip()),
-            )
-            key = str(self.config.get("bailian_api_key", "")).strip()
-            if not key:
-                raise ValueError("api_key_missing")
-            endpoint = str(self.config.get("bailian_api_url", ENDPOINT)).strip()
-            if not endpoint:
-                raise ValueError("api_url_missing")
-            if self._http is None or self._http.closed:
-                self._http = aiohttp.ClientSession()
-            async with self._http.post(
-                endpoint,
-                # Match the Authorization value in the user's console example.
-                # A complete value containing "Bearer " is also accepted as-is.
-                headers={"Authorization": key},
-                json=payload,
-                timeout=aiohttp.ClientTimeout(
-                    total=float(self.config.get("timeout_seconds", 8))
-                ),
-                allow_redirects=False,
-            ) as response:
-                if response.status != 200:
-                    # Response bodies may contain user text or credentials.
-                    raise ValueError(f"decision_http_{response.status}")
-                body = await response.json(content_type=None)
-            probability = parse_probability(body)
-            threshold = float(self.config.get("reply_threshold", 0.5))
-            if not 0 <= threshold <= 1:
-                raise ValueError("invalid_reply_threshold")
-            should_reply = probability >= threshold
-            event.set_extra(
-                "reply_gate_decision",
-                {
-                    "reply": should_reply,
-                    "source": MODEL,
-                    "probability": probability,
-                    "dropped_messages": window.dropped_messages,
-                    "dropped_group_records": window.dropped_group_records,
-                    "shortened_current": window.shortened_current,
-                },
-            )
-            self.logger.info(
-                "Reply gate: reply=%s probability=%.4f decision_dropped_messages=%d decision_dropped_group_records=%d decision_shortened_current=%s",
-                should_reply,
-                probability,
-                window.dropped_messages,
-                window.dropped_group_records,
-                window.shortened_current,
-            )
+            if has_image(current):
+                should_reply = await judge_image(
+                    self.context,
+                    event,
+                    req,
+                    current,
+                    instructions,
+                    float(self.config.get("vision_timeout_seconds", 30)),
+                )
+                event.set_extra(
+                    "reply_gate_decision",
+                    {
+                        "reply": should_reply,
+                        "source": "reply_model_vision",
+                    },
+                )
+                self.logger.info(
+                    "Reply gate: reply=%s source=reply_model_vision full_context=True",
+                    should_reply,
+                )
+            else:
+                history = [
+                    copy.deepcopy(msg)
+                    for msg in req.contexts
+                    if isinstance(msg, dict) and msg.get("role")
+                ]
+                # Only this detached decision window is trimmed. AstrBot retains
+                # ownership of the original request, context limits and persistence.
+                window, payload = fit_context(
+                    history,
+                    current,
+                    req.system_prompt,
+                    instructions,
+                    int(self.config.get("context_budget", 60_000)),
+                    bool(req.prompt and req.prompt.strip()),
+                )
+                key = str(self.config.get("bailian_api_key", "")).strip()
+                if not key:
+                    raise ValueError("api_key_missing")
+                endpoint = str(self.config.get("bailian_api_url", ENDPOINT)).strip()
+                if not endpoint:
+                    raise ValueError("api_url_missing")
+                if self._http is None or self._http.closed:
+                    self._http = aiohttp.ClientSession()
+                async with self._http.post(
+                    endpoint,
+                    # Match the Authorization value in the user's console example.
+                    # A complete value containing "Bearer " is also accepted as-is.
+                    headers={"Authorization": key},
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(
+                        total=float(self.config.get("timeout_seconds", 8))
+                    ),
+                    allow_redirects=False,
+                ) as response:
+                    if response.status != 200:
+                        # Response bodies may contain user text or credentials.
+                        raise ValueError(f"decision_http_{response.status}")
+                    body = await response.json(content_type=None)
+                probability = parse_probability(body)
+                threshold = float(self.config.get("reply_threshold", 0.5))
+                if not 0 <= threshold <= 1:
+                    raise ValueError("invalid_reply_threshold")
+                should_reply = probability >= threshold
+                event.set_extra(
+                    "reply_gate_decision",
+                    {
+                        "reply": should_reply,
+                        "source": MODEL,
+                        "probability": probability,
+                        "dropped_messages": window.dropped_messages,
+                        "dropped_group_records": window.dropped_group_records,
+                        "shortened_current": window.shortened_current,
+                    },
+                )
+                self.logger.info(
+                    "Reply gate: reply=%s probability=%.4f decision_dropped_messages=%d decision_dropped_group_records=%d decision_shortened_current=%s",
+                    should_reply,
+                    probability,
+                    window.dropped_messages,
+                    window.dropped_group_records,
+                    window.shortened_current,
+                )
             if should_reply:
                 return
         except asyncio.CancelledError:
@@ -162,6 +184,9 @@ class ReplyGate(Star):
                     "invalid_decision_response",
                     "invalid_decision_probability",
                     "invalid_reply_threshold",
+                    "reply_provider_missing",
+                    "reply_provider_has_no_vision",
+                    "invalid_vision_decision",
                 }
                 else (
                     str(exc)

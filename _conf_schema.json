@@ -3,7 +3,7 @@
     "description": "启用回复判断",
     "type": "bool",
     "default": true,
-    "hint": "@ 机器人直接回复；其他用户消息先交给阿里云百炼决策模型判断。"
+    "hint": "@ 机器人直接回复；含图片消息由当前回复模型结合完整上下文判断；纯文字由百炼模型读取近期上下文判断。"
   },
   "bailian_api_url": {
     "description": "百炼决策 API 地址",
@@ -50,6 +50,12 @@
       "step": 1
     },
     "hint": "接口失败、超时或返回无效结果时保持沉默；@ 不调用判断接口。"
+  },
+  "vision_timeout_seconds": {
+    "description": "含图消息判断超时秒数",
+    "type": "float",
+    "default": 30,
+    "hint": "含图片消息额外调用当前回复模型判断，使用完整上下文，跳过百炼及文字判断预算。失败或超时保持沉默，@ 仍直接回复。"
   },
   "decision_instructions": {
     "description": "是否回复的判断规则",

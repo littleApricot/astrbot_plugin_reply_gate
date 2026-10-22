@@ -22,25 +22,33 @@ def main() -> None:
         raise ValueError("Unexpected plugin repository")
     version = str(metadata["version"])
     tag = version if version.startswith("v") else f"v{version}"
-    registry = {
-        "$meta": {
-            "schema_version": 1,
-            "name": "littleApricot AstrBot Plugins",
-            "version": version,
-            "description": "回复判断插件发布源",
-            "repository": repo,
-        },
-        "littleApricot/astrbot_plugin_reply_gate": {
-            "author": metadata["author"],
-            "name": metadata["name"],
-            "display_name": metadata["display_name"],
-            "desc": metadata["desc"],
-            "version": version,
-            "repo": repo,
-            "download_url": f"{repo}/archive/refs/tags/{tag}.zip",
-            "astrbot_version": metadata["astrbot_version"],
-        },
-    }
+    registry_path = root / "plugins.json"
+    registry = (
+        json.loads(registry_path.read_text(encoding="utf-8"))
+        if registry_path.exists()
+        else {}
+    )
+    registry.update(
+        {
+            "$meta": {
+                "schema_version": 1,
+                "name": "littleApricot AstrBot Plugins",
+                "version": version,
+                "description": "回复判断与群聊表情图库发布源",
+                "repository": repo,
+            },
+            "littleApricot/astrbot_plugin_reply_gate": {
+                "author": metadata["author"],
+                "name": metadata["name"],
+                "display_name": metadata["display_name"],
+                "desc": metadata["desc"],
+                "version": version,
+                "repo": repo,
+                "download_url": f"{repo}/archive/refs/tags/{tag}.zip",
+                "astrbot_version": metadata["astrbot_version"],
+            },
+        }
+    )
     content = json.dumps(registry, ensure_ascii=False, indent=2) + "\n"
     (root / "plugins.json").write_text(content, encoding="utf-8")
     checksum = {"md5": hashlib.md5(content.encode("utf-8")).hexdigest()}

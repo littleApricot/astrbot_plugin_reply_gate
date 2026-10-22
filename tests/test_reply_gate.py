@@ -28,6 +28,7 @@ from astrbot.core.provider.entities import LLMResponse, ProviderMeta, ProviderRe
 from astrbot.core.provider.provider import Provider
 from astrbot.core.star.star import star_map
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
+
 from astrbot_plugin_reply_gate.main import ReplyGate
 from astrbot_plugin_reply_gate.shared_context import (
     DEFAULT_INSTRUCTIONS,
@@ -224,6 +225,9 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.requests = []
         self.reply_calls = []
+        self.vision_calls = []
+        self.vision_decision = True
+        self.vision_response = None
         self.prepared_requests = []
         self.request_snapshots = []
         self.probability = 0.9
@@ -256,6 +260,26 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 update_conversation=AsyncMock(side_effect=self.save_history)
             ),
         )
+        self.vision_provider = MagicMock(spec=Provider)
+        self.vision_provider.provider_config = {
+            "id": "fake-reply",
+            "modalities": ["text", "image"],
+        }
+
+        async def record_vision(**kwargs):
+            self.vision_calls.append(copy.deepcopy(kwargs))
+            return LLMResponse(
+                role="assistant",
+                completion_text=self.vision_response
+                if self.vision_response is not None
+                else json.dumps({"should_reply": self.vision_decision}),
+            )
+
+        self.vision_provider.text_chat = AsyncMock(side_effect=record_vision)
+        self.context.get_using_provider_async = AsyncMock(
+            return_value=self.vision_provider
+        )
+        self.context.get_provider_by_id = MagicMock(return_value=self.vision_provider)
         self.plugin = ReplyGate(self.context, self.config)
         self.history_stage = InternalAgentSubStage()
         self.history_stage.conv_manager = self.context.conversation_manager
@@ -328,6 +352,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
     async def run_reply_stage(self, event):
         req = ProviderRequest(
             prompt=event.message_str,
+            model=event.get_extra("selected_model"),
             system_prompt="PERSONA: you are a helpful group member.",
             contexts=copy.deepcopy(self.histories.get(event.unified_msg_origin, [])),
             extra_user_content_parts=copy.deepcopy(self.extra_parts),
@@ -474,7 +499,15 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             event.get_extra("reply_gate_decision")["reason"], "api_url_missing"
         )
 
-    async def test_current_image_keeps_silent_but_mention_can_still_reply(self):
+    async def test_current_image_uses_reply_model_with_full_context_and_no_bailian_key(
+        self,
+    ):
+        self.config["bailian_api_key"] = ""
+        original = [
+            {"role": "user", "content": "OLD" * 4000},
+            {"role": "assistant", "content": "old reply"},
+        ]
+        self.histories[make_event().unified_msg_origin] = copy.deepcopy(original)
         self.extra_parts.append(
             ImageURLPart(
                 image_url=ImageURLPart.ImageURL(url="data:image/png;base64,dGVzdA==")
@@ -482,15 +515,60 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         )
         event = await self.dispatch(make_event("看这张图"))
         self.assertEqual(self.requests, [])
-        self.assertEqual(self.reply_calls, [])
+        self.assertEqual(len(self.reply_calls), 1)
+        self.assertEqual(len(self.vision_calls), 1)
+        self.assertEqual(self.vision_calls[0]["contexts"][:2], original)
+        self.assertIn("data:image/png;base64,", json.dumps(self.vision_calls[0]))
+        self.assertIn("MEMORY", json.dumps(self.vision_calls[0]))
+        self.assertIsNone(self.vision_calls[0]["func_tool"])
+        self.assertEqual(self.prepared_requests[-1], self.request_snapshots[-1])
         self.assertEqual(
-            event.get_extra("reply_gate_decision")["reason"], "unsupported_media"
+            event.get_extra("reply_gate_decision")["source"], "reply_model_vision"
         )
         await self.dispatch(make_event("看这张图", mention=True))
         self.assertEqual(self.requests, [])
-        self.assertEqual(len(self.reply_calls), 1)
+        self.assertEqual(len(self.reply_calls), 2)
+        self.assertEqual(len(self.vision_calls), 1)
+
+    async def test_image_decision_honors_selected_provider_and_model(self):
+        self.extra_parts.append(
+            ImageURLPart(
+                image_url=ImageURLPart.ImageURL(url="data:image/png;base64,dGVzdA==")
+            )
+        )
+        e = make_event("image")
+        e.set_extra("selected_provider", "explicit-provider")
+        e.set_extra("selected_model", "explicit-model")
+        await self.dispatch(e)
+        self.context.get_provider_by_id.assert_called_with("explicit-provider")
+        self.assertEqual(self.vision_calls[0]["model"], "explicit-model")
+
+    async def test_image_decision_rejection_and_invalid_output_preserve_full_history(
+        self,
+    ):
+        self.extra_parts.append(
+            ImageURLPart(
+                image_url=ImageURLPart.ImageURL(url="data:image/png;base64,dGVzdA==")
+            )
+        )
+        for value in [False, "invalid"]:
+            with self.subTest(value=value):
+                self.vision_decision = False
+                self.vision_response = "not json" if value == "invalid" else None
+                e = make_event("original image message", session=str(value))
+                original = [{"role": "user", "content": "OLD" * 3000}]
+                self.histories[e.unified_msg_origin] = copy.deepcopy(original)
+                await self.dispatch(e)
+                self.assertTrue(e.is_stopped())
+                saved = self.histories[e.unified_msg_origin]
+                self.assertEqual(saved[:1], original)
+                self.assertIn("image_url", json.dumps(saved))
+                self.assertEqual(self.prepared_requests[-1], self.request_snapshots[-1])
+        self.assertEqual(self.requests, [])
+        self.assertEqual(self.reply_calls, [])
 
     async def test_text_after_an_unanswered_image_can_be_judged(self):
+        self.vision_decision = False
         self.extra_parts.append(
             ImageURLPart(
                 image_url=ImageURLPart.ImageURL(url="data:image/png;base64,dGVzdA==")
