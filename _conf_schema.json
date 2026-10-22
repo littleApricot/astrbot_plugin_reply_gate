@@ -1,0 +1,60 @@
+{
+  "enabled": {
+    "description": "启用回复判断",
+    "type": "bool",
+    "default": true,
+    "hint": "@ 机器人直接回复；其他用户消息先交给阿里云百炼决策模型判断。"
+  },
+  "bailian_api_url": {
+    "description": "百炼决策 API 地址",
+    "type": "string",
+    "default": "",
+    "hint": "粘贴百炼控制台参考代码中的完整请求地址，包含业务空间域名和 /compatible-mode/v1/systemone。首次升级到支持在线更新的版本时需要填写一次，后续更新会保留该配置。"
+  },
+  "bailian_api_key": {
+    "description": "百炼 API Key / Authorization",
+    "type": "string",
+    "default": "",
+    "secret": true,
+    "hint": "填写百炼控制台参考代码中 Authorization 的完整值，插件原样发送；如果示例带 Bearer 前缀，请一并填写。不要填其他平台的 Key。留空时普通消息保持沉默，@ 仍正常回复。"
+  },
+  "reply_threshold": {
+    "description": "回复概率阈值",
+    "type": "float",
+    "default": 0.5,
+    "slider": {
+      "min": 0,
+      "max": 1,
+      "step": 0.01
+    },
+    "hint": "判断结果达到此值才回复。提高后更少插话；初始 0.5 是起点，需要根据群聊效果调整。"
+  },
+  "context_budget": {
+    "description": "共享上下文预算",
+    "type": "int",
+    "default": 60000,
+    "slider": {
+      "min": 2048,
+      "max": 62000,
+      "step": 512
+    },
+    "hint": "判断和回复共用截断后的内容。使用 UTF-8 字节保守估算文本 token，包含判断指令和预留空间；不等于精确 tokenizer 计数。优先删除最老的完整对话轮次，再删除积压群消息；保留人格、已注入的记忆和最近消息。百炼这款模型仅支持文字。"
+  },
+  "timeout_seconds": {
+    "description": "判断超时秒数",
+    "type": "float",
+    "default": 8,
+    "slider": {
+      "min": 1,
+      "max": 30,
+      "step": 1
+    },
+    "hint": "接口失败、超时或返回无效结果时保持沉默；@ 不调用判断接口。"
+  },
+  "decision_instructions": {
+    "description": "是否回复的判断规则",
+    "type": "text",
+    "default": "",
+    "hint": "留空使用内置规则，判断此刻是否适合接话；打招呼、确认在线、玩笑和寒暄都属于合理互动。可按机器人性格和群聊习惯修改。人格、记忆和对话内容由插件从正式回复请求中自动取得。"
+  }
+}
