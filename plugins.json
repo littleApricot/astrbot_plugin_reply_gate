@@ -21,9 +21,9 @@
     "name": "astrbot_plugin_meme_library",
     "display_name": "群聊表情图库",
     "desc": "自动收集群聊图片，维护名称和简短描述，支持看图选择、用法纠正、停用及原图路径读取。",
-    "version": "v0.2.8",
+    "version": "v0.2.9",
     "repo": "https://github.com/littleApricot/astrbot_plugin_meme_library",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_meme_library/archive/refs/tags/v0.2.8.zip",
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_meme_library/archive/refs/tags/v0.2.9.zip",
     "astrbot_version": ">=4.29.1,<4.30.0"
   },
   "littleApricot/astrbot_plugin_self_prompt": {
@@ -44,6 +44,16 @@
     "version": "v0.1.0",
     "repo": "https://github.com/littleApricot/astrbot_plugin_self_balance",
     "download_url": "https://github.com/littleApricot/astrbot_plugin_self_balance/archive/refs/tags/v0.1.0.zip",
+    "astrbot_version": ">=4.29.1,<4.30.0"
+  },
+  "littleApricot/astrbot_plugin_silence": {
+    "author": "littleApricot",
+    "name": "astrbot_plugin_silence",
+    "display_name": "沉默工具",
+    "desc": "让模型随时选择结束当前轮，可直接沉默或在任意工具操作后停止回复。",
+    "version": "v0.1.0",
+    "repo": "https://github.com/littleApricot/astrbot_plugin_silence",
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_silence/archive/refs/tags/v0.1.0.zip",
     "astrbot_version": ">=4.29.1,<4.30.0"
   }
 }
