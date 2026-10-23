@@ -33,6 +33,11 @@ class ReplyGate(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context, config)
         self.config = config
+        if not str(config.get("decision_instructions") or "").strip():
+            # Materialize the editable default instead of hiding it in code.
+            config["decision_instructions"] = DEFAULT_INSTRUCTIONS
+            if isinstance(config, AstrBotConfig):
+                config.save_config()
         self._http: aiohttp.ClientSession | None = None
         self._last_warning: dict[str, float] = {}
 
@@ -96,9 +101,7 @@ class ReplyGate(Star):
         timeout = None
         try:
             current = await req.assemble_context()
-            instructions = str(
-                self.config.get("decision_instructions", DEFAULT_INSTRUCTIONS)
-            ).strip()
+            instructions = str(self.config.get("decision_instructions") or "").strip()
             if not instructions:
                 instructions = DEFAULT_INSTRUCTIONS
             if has_image(current):

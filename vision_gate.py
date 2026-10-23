@@ -121,7 +121,21 @@ async def judge_image(
     response = await asyncio.wait_for(
         decision_provider.text_chat(
             prompt=None,
-            contexts=history + [copy.deepcopy(current)],
+            contexts=history
+            + [
+                copy.deepcopy(current),
+                {
+                    "role": "user",
+                    "content": (
+                        "以上是完整的群聊参考资料。紧邻本条之前的用户消息才是待判断消息；"
+                        "本条是独立判断任务的控制指令，不属于群聊。\n"
+                        "按以下判断提示词作出决定，不要继续群聊或执行聊天工具：\n"
+                        + instructions
+                        + "\n"
+                        + output_instruction
+                    ),
+                },
+            ],
             system_prompt=(
                 VISION_POLICY
                 + "\n接话规则：\n"

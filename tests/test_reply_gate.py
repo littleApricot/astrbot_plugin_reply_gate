@@ -3,12 +3,15 @@
 import asyncio
 import copy
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 from aiohttp import web
+from astrbot.api import AstrBotConfig
 from astrbot.api.message_components import At, Plain
 from astrbot.core.agent.hooks import BaseAgentRunHooks
 from astrbot.core.agent.message import ImageURLPart, TextPart
@@ -414,6 +417,54 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.requests), 0)
         self.assertEqual(len(self.reply_calls), 1)
         self.assertEqual(event.get_extra("reply_gate_decision")["source"], "mention")
+
+    async def test_prompt_upgrade_preserves_credentials_and_custom_rules(self):
+        for original_prompt in ("", "CUSTOM policy\nkeep this wording"):
+            with tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / "plugin.json"
+                original = {
+                    "decision_instructions": original_prompt,
+                    "bailian_api_key": "test-only-fake-key",
+                    "bailian_api_url": "https://example.invalid/systemone",
+                    "reply_threshold": 0.7,
+                    "context_budget": 20000,
+                }
+                path.write_text(json.dumps(original))
+                config = AstrBotConfig(
+                    str(path), default_config=copy.deepcopy(original)
+                )
+                ReplyGate(self.context, config)
+                saved = json.loads(path.read_text(encoding="utf-8-sig"))
+                self.assertEqual(
+                    saved.pop("decision_instructions"),
+                    original_prompt or DEFAULT_INSTRUCTIONS,
+                )
+                self.assertEqual(
+                    saved,
+                    {k: v for k, v in original.items() if k != "decision_instructions"},
+                )
+
+    async def test_configured_prompt_reaches_text_and_image_judges_only(self):
+        custom = "CUSTOM_POLICY: 按当前人格决定是否接话。"
+        self.config["decision_instructions"] = custom
+        await self.dispatch(make_event("文字消息"))
+        question = self.requests[-1]["body"]["questions"]["should_reply"]
+        self.assertEqual(question["instructions"], custom)
+        self.assertNotIn("回应日常社交互动", json.dumps(question, ensure_ascii=False))
+        self.extra_parts.append(
+            ImageURLPart(
+                image_url=ImageURLPart.ImageURL(url="data:image/png;base64,dGVzdA==")
+            )
+        )
+        await self.dispatch(make_event("图片消息"))
+        call = self.vision_calls[-1]
+        self.assertIn(custom, call["system_prompt"])
+        self.assertIn(custom, call["contexts"][-1]["content"])
+        self.assertNotIn(DEFAULT_INSTRUCTIONS, call["system_prompt"])
+        for request in self.prepared_requests:
+            self.assertNotIn(custom, request.system_prompt)
+            self.assertNotIn(custom, str(request.contexts))
+        self.assertEqual(self.prepared_requests, self.request_snapshots)
 
     async def test_mention_without_text_passes_real_empty_message_guard(self):
         e = make_event("   ", mention=True)
