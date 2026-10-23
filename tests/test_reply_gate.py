@@ -413,6 +413,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_mention_bypasses_missing_key_and_the_http_service(self):
         self.config["bailian_api_key"] = ""
+        self.config["failure_default_reply"] = False
         event = await self.dispatch(make_event(mention=True))
         self.assertEqual(len(self.requests), 0)
         self.assertEqual(len(self.reply_calls), 1)
@@ -444,6 +445,37 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                     {k: v for k, v in original.items() if k != "decision_instructions"},
                 )
 
+    async def test_failure_policy_upgrade_defaults_open_and_preserves_saved_choice(
+        self,
+    ):
+        schema = json.loads(
+            (Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text()
+        )
+        for previous in (None, False, True):
+            with (
+                self.subTest(previous=previous),
+                tempfile.TemporaryDirectory() as folder,
+            ):
+                path = Path(folder) / "plugin.json"
+                original = {
+                    "decision_instructions": "MY_RULES",
+                    "bailian_api_key": "test-only-fake-key",
+                    "bailian_api_url": "https://example.invalid/systemone",
+                    "reply_threshold": 0.7,
+                    "context_budget": 20000,
+                }
+                if previous is not None:
+                    original["failure_default_reply"] = previous
+                path.write_text(json.dumps(original))
+                config = AstrBotConfig(str(path), schema=schema)
+                ReplyGate(self.context, config)
+                saved = json.loads(path.read_text(encoding="utf-8-sig"))
+                self.assertIs(
+                    saved["failure_default_reply"],
+                    True if previous is None else previous,
+                )
+                self.assertEqual({key: saved[key] for key in original}, original)
+
     async def test_configured_prompt_reaches_text_and_image_judges_only(self):
         custom = "CUSTOM_POLICY: 按当前人格决定是否接话。"
         self.config["decision_instructions"] = custom
@@ -467,6 +499,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.prepared_requests, self.request_snapshots)
 
     async def test_mention_without_text_passes_real_empty_message_guard(self):
+        self.config["failure_default_reply"] = False
         e = make_event("   ", mention=True)
         e.message_obj.message = [At(qq="bot-1")]
         original_chain = copy.deepcopy(e.get_messages())
@@ -760,6 +793,177 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                     e.get_extra("reply_gate_decision")["source"], "error_fallback"
                 )
         self.assertEqual(len(self.reply_calls), 3)
+
+    async def test_text_failures_follow_policy_and_retain_full_unsent_turns(self):
+        for fallback in (False, True):
+            for mode, reason in (
+                ("http", "decision_http_503"),
+                ("empty", "invalid_decision_response"),
+                ("timeout", "TimeoutError"),
+                ("missing_key", "api_key_missing"),
+                ("context", "context_budget_out_of_range"),
+            ):
+                with self.subTest(fallback=fallback, mode=mode):
+                    self.config.update(
+                        failure_default_reply=fallback,
+                        bailian_api_key="" if mode == "missing_key" else "test-key",
+                        timeout_seconds=0.01 if mode == "timeout" else 30,
+                        context_budget=1 if mode == "context" else 4000,
+                    )
+                    self.status = 503 if mode == "http" else 200
+                    self.response_body = {} if mode == "empty" else None
+                    self.delay = 0.1 if mode == "timeout" else 0
+                    event = make_event(
+                        "CURRENT_START" + "中文" * 3000 + "LATEST",
+                        session=f"text-{fallback}-{mode}",
+                    )
+                    original = [
+                        {"role": "user", "content": "OLD" * 2000},
+                        {"role": "assistant", "content": "old answer"},
+                    ]
+                    self.histories[event.unified_msg_origin] = copy.deepcopy(original)
+                    replies_before = len(self.reply_calls)
+                    saves_before = self.context.conversation_manager.update_conversation.await_count
+                    with self.assertLogs(self.plugin.logger, level="WARNING") as logs:
+                        await self.dispatch(event)
+                    self.assertEqual(event.is_stopped(), not fallback)
+                    result = event.get_extra("reply_gate_decision")
+                    self.assertIs(result["reply"], fallback)
+                    self.assertEqual(result["source"], "error_fallback")
+                    self.assertEqual(result["reason"], reason)
+                    self.assertIn(
+                        "failed open" if fallback else "failed closed", str(logs.output)
+                    )
+                    self.assertEqual(
+                        len(self.reply_calls) - replies_before, int(fallback)
+                    )
+                    self.assertEqual(
+                        self.prepared_requests[-1], self.request_snapshots[-1]
+                    )
+                    saved = self.histories[event.unified_msg_origin]
+                    self.assertEqual(saved[:2], original)
+                    self.assertEqual(len(saved), 4 if fallback else 3)
+                    self.assertIn(
+                        event.message_str, json.dumps(saved, ensure_ascii=False)
+                    )
+                    self.assertNotIn("MEMORY", json.dumps(saved))
+                    self.assertEqual(
+                        self.context.conversation_manager.update_conversation.await_count
+                        - saves_before,
+                        1,
+                    )
+
+    async def test_image_failures_follow_policy_and_retain_full_unsent_images(self):
+        self.extra_parts.append(
+            ImageURLPart(
+                image_url=ImageURLPart.ImageURL(url="data:image/png;base64,dGVzdA==")
+            )
+        )
+        normal_judge = self.vision_provider.text_chat.side_effect
+        for fallback in (False, True):
+            for mode, reason in (
+                ("invalid_json", "invalid_vision_json"),
+                ("invalid_schema", "invalid_vision_schema"),
+                ("empty", "empty_vision_decision"),
+                ("timeout", "TimeoutError"),
+                ("http", "provider_http_402"),
+            ):
+                with self.subTest(fallback=fallback, mode=mode):
+                    self.config["failure_default_reply"] = fallback
+                    self.vision_response = {
+                        "invalid_json": "not json",
+                        "invalid_schema": '{"should_reply":"false"}',
+                        "empty": "",
+                    }.get(mode)
+                    self.vision_provider.text_chat.side_effect = (
+                        TimeoutError()
+                        if mode == "timeout"
+                        else APIStatusError(
+                            "private-error-body",
+                            response=httpx.Response(
+                                402,
+                                request=httpx.Request(
+                                    "POST", "https://example.invalid"
+                                ),
+                            ),
+                            body={"private": "private-error-body"},
+                        )
+                        if mode == "http"
+                        else normal_judge
+                    )
+                    event = make_event(
+                        "original image", session=f"image-{fallback}-{mode}"
+                    )
+                    original = [{"role": "user", "content": "OLD" * 3000}]
+                    self.histories[event.unified_msg_origin] = copy.deepcopy(original)
+                    replies_before = len(self.reply_calls)
+                    saves_before = self.context.conversation_manager.update_conversation.await_count
+                    with self.assertLogs(self.plugin.logger, level="WARNING") as logs:
+                        await self.dispatch(event)
+                    result = event.get_extra("reply_gate_decision")
+                    self.assertEqual(event.is_stopped(), not fallback)
+                    self.assertIs(result["reply"], fallback)
+                    self.assertEqual(result["source"], "error_fallback")
+                    self.assertEqual(result["decision_source"], "reply_model_vision")
+                    self.assertEqual(result["reason"], reason)
+                    self.assertNotIn("private-error-body", str(logs.output))
+                    self.assertEqual(
+                        len(self.reply_calls) - replies_before, int(fallback)
+                    )
+                    self.assertEqual(
+                        self.prepared_requests[-1], self.request_snapshots[-1]
+                    )
+                    saved = self.histories[event.unified_msg_origin]
+                    self.assertEqual(saved[:1], original)
+                    self.assertIn("image_url", json.dumps(saved))
+                    self.assertNotIn("MEMORY", json.dumps(saved))
+                    self.assertEqual(len(saved), 3 if fallback else 2)
+                    self.assertEqual(
+                        self.context.conversation_manager.update_conversation.await_count
+                        - saves_before,
+                        1,
+                    )
+        self.assertEqual(self.requests, [])
+
+    async def test_failure_policy_does_not_override_valid_text_or_image_decisions(self):
+        for fallback in (False, True):
+            for image in (False, True):
+                for reply in (False, True):
+                    with self.subTest(fallback=fallback, image=image, reply=reply):
+                        self.config["failure_default_reply"] = fallback
+                        self.extra_parts = []
+                        if image:
+                            self.extra_parts.append(
+                                ImageURLPart(
+                                    image_url=ImageURLPart.ImageURL(
+                                        url="data:image/png;base64,dGVzdA=="
+                                    )
+                                )
+                            )
+                        self.probability = 0.9 if reply else 0.1
+                        self.vision_decision = reply
+                        event = await self.dispatch(
+                            make_event(session=f"valid-{fallback}-{image}-{reply}")
+                        )
+                        self.assertEqual(event.is_stopped(), not reply)
+                        self.assertIs(
+                            event.get_extra("reply_gate_decision")["reply"], reply
+                        )
+                        self.assertNotEqual(
+                            event.get_extra("reply_gate_decision")["source"],
+                            "error_fallback",
+                        )
+
+    async def test_failed_closed_turn_is_visible_after_decision_service_recovers(self):
+        self.config["failure_default_reply"] = False
+        self.status = 503
+        first = await self.dispatch(make_event("I mentioned a blue cat"))
+        self.assertTrue(first.is_stopped())
+        self.assertEqual(self.reply_calls, [])
+        self.status = 200
+        await self.dispatch(make_event("What colour was it?"))
+        self.assertIn("blue cat", json.dumps(self.requests[-1]["body"]))
+        self.assertEqual(len(self.reply_calls), 1)
 
     async def test_vision_timeout_passes_but_cancellation_still_cancels(self):
         self.extra_parts.append(

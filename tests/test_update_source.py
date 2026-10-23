@@ -85,7 +85,11 @@ class UpdateSourceTests(unittest.IsolatedAsyncioTestCase):
         (target / "old_file.py").write_text("old plugin")
         local_config = self.workspace / "config/astrbot_plugin_reply_gate_config.json"
         local_config.parent.mkdir()
-        saved = {"bailian_api_key": "test-only-fake-key", "reply_threshold": 0.05}
+        saved = {
+            "bailian_api_key": "test-only-fake-key",
+            "reply_threshold": 0.05,
+            "failure_default_reply": False,
+        }
         local_config.write_text(json.dumps(saved))
         plugin = StarMetadata(
             name="astrbot_plugin_reply_gate",

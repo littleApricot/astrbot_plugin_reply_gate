@@ -1,7 +1,7 @@
 name: astrbot_plugin_reply_gate
 display_name: 回复判断
 desc: 文字用百炼读取近期上下文判断，含图用回复模型结合完整上下文判断，@ 直接回复。
-version: v0.4.4
+version: v0.4.5
 author: littleApricot
 repo: https://github.com/littleApricot/astrbot_plugin_reply_gate
 astrbot_version: ">=4.29.1,<4.30.0"

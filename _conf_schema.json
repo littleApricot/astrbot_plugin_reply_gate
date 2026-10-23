@@ -16,7 +16,13 @@
     "type": "string",
     "default": "",
     "secret": true,
-    "hint": "填写百炼控制台参考代码中 Authorization 的完整值，插件原样发送；如果示例带 Bearer 前缀，请一并填写。不要填其他平台的 Key。留空时无法取得判断结果，自动放行给正式回复流程。"
+    "hint": "填写百炼控制台参考代码中 Authorization 的完整值，插件原样发送；如果示例带 Bearer 前缀，请一并填写。不要填其他平台的 Key。留空时按“判断失败时默认通过”配置处理。"
+  },
+  "failure_default_reply": {
+    "description": "判断失败时默认通过",
+    "type": "bool",
+    "default": true,
+    "hint": "开启：判断失败后进入正式回复流程；关闭：保持沉默。文字和图片判断共用，适用于超时、接口报错、配置缺失或返回无有效结果。有效判断仍按结果执行；@ 机器人始终跳过判断。"
   },
   "reply_threshold": {
     "description": "回复概率阈值",
@@ -49,13 +55,13 @@
       "max": 30,
       "step": 1
     },
-    "hint": "文字判断超时后自动放行给正式回复流程；@ 跳过判断。"
+    "hint": "文字判断超时后按“判断失败时默认通过”配置处理；@ 跳过判断。"
   },
   "vision_timeout_seconds": {
     "description": "含图消息判断超时秒数",
     "type": "float",
     "default": 30,
-    "hint": "含图片消息额外调用当前回复模型判断，使用完整上下文；超时或无有效结果时自动放行，@ 跳过判断。"
+    "hint": "含图片消息额外调用当前回复模型判断，使用完整上下文；超时或无有效结果时按“判断失败时默认通过”配置处理，@ 跳过判断。"
   },
   "decision_instructions": {
     "description": "判断提示词（文字和图片共用）",

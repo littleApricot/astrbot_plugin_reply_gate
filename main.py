@@ -227,10 +227,11 @@ class ReplyGate(Star):
             )
             if isinstance(exc, APIStatusError):
                 reason = f"provider_http_{exc.status_code}"
+            fallback_reply = bool(self.config.get("failure_default_reply", True))
             event.set_extra(
                 "reply_gate_decision",
                 {
-                    "reply": True,
+                    "reply": fallback_reply,
                     "source": "error_fallback",
                     "decision_source": decision_source,
                     "reason": reason,
@@ -239,17 +240,20 @@ class ReplyGate(Star):
                 },
             )
             now = time.monotonic()
-            warning_key = f"{decision_source}:{reason}"
+            warning_key = f"{decision_source}:{reason}:{fallback_reply}"
             if now - self._last_warning.get(warning_key, -60) >= 60:
                 self.logger.warning(
-                    "Reply gate failed open: reason=%s source=%s elapsed_seconds=%.3f timeout_seconds=%s. Passing the original request to the reply model.",
+                    "Reply gate failed %s: reason=%s source=%s elapsed_seconds=%.3f timeout_seconds=%s fallback_reply=%s.",
+                    "open" if fallback_reply else "closed",
                     reason,
                     decision_source,
                     now - started,
                     timeout,
+                    fallback_reply,
                 )
                 self._last_warning[warning_key] = now
-            return
+            if fallback_reply:
+                return
 
         event.stop_event()
         if req.conversation and current is not None:
