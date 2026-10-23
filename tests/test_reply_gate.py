@@ -240,6 +240,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.histories = {}
         self.response_body = None
         self.delay = 0
+        self.reply_started = asyncio.Event()
+        self.reply_release = None
         self.extra_parts = [TextPart(text="MEMORY: user likes cats").mark_as_temp()]
         app = web.Application()
         app.router.add_post("/compatible-mode/v1/systemone", self.serve_decision)
@@ -257,6 +259,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             "enabled": True,
             "bailian_api_key": "test-only-fake-key",
             "context_budget": 4000,
+            "merge_idle_seconds": 0,
+            "merge_max_wait_seconds": 0,
         }
         self.astr_config = copy.deepcopy(DEFAULT_CONFIG)
         self.context = SimpleNamespace(
@@ -355,6 +359,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.histories[origin] = copy.deepcopy(history)
 
     async def run_reply_stage(self, event):
+        if await call_event_hook(event, EventType.OnWaitingLLMRequestEvent):
+            return
         req = ProviderRequest(
             prompt=event.message_str,
             model=event.get_extra("selected_model"),
@@ -382,6 +388,9 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
 
         async def record_reply(**kwargs):
             self.reply_calls.append({"contexts": copy.deepcopy(kwargs["contexts"])})
+            self.reply_started.set()
+            if self.reply_release is not None:
+                await self.reply_release.wait()
             return LLMResponse(role="assistant", completion_text="这是测试回复")
 
         provider.text_chat = AsyncMock(side_effect=record_reply)
@@ -405,11 +414,14 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         event.call_llm = True
 
     async def dispatch(self, event):
-        await self.waking.process(event)
-        if not event.is_stopped():
-            async for _ in self.process_stage.process(event):
-                pass
-        return event
+        try:
+            await self.waking.process(event)
+            if not event.is_stopped():
+                async for _ in self.process_stage.process(event):
+                    pass
+            return event
+        finally:
+            event.cleanup_temporary_local_files()
 
     async def test_mention_bypasses_missing_key_and_the_http_service(self):
         self.config["bailian_api_key"] = ""
@@ -1232,3 +1244,323 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(event.is_stopped())
         self.assertFalse(event.get_extra("reply_gate_decision")["reply"])
         self.assertEqual(self.requests, [])
+
+    def enable_batching(self, idle=0.04, maximum=0.15):
+        self.config.update(merge_idle_seconds=idle, merge_max_wait_seconds=maximum)
+        self.astr_config["timezone"] = "Asia/Shanghai"
+        manager = self.context.conversation_manager
+        manager.get_curr_conversation_id = AsyncMock(side_effect=lambda umo: umo)
+        manager.get_conversation = AsyncMock(
+            side_effect=lambda umo, cid: SimpleNamespace(
+                cid=cid, history=json.dumps(self.histories.get(umo, [])), token_usage=0
+            )
+        )
+
+    async def test_continuous_messages_share_one_decision_reply_and_individual_history(
+        self,
+    ):
+        self.enable_batching()
+        events = [
+            make_event("第一句", sender="alice"),
+            make_event("第二句", sender="bob"),
+            make_event("第三句", sender="alice"),
+        ]
+        for i, event in enumerate(events):
+            event.message_obj.sender.nickname = ["Alice", "Bob", "Alice"][i]
+        await asyncio.wait_for(asyncio.gather(*(self.dispatch(e) for e in events)), 2)
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(len(self.reply_calls), 1)
+        decision_text = json.dumps(self.requests[0]["body"], ensure_ascii=False)
+        reply_text = json.dumps(self.reply_calls[0], ensure_ascii=False)
+        for text in ["第一句", "第二句", "第三句", "Alice", "Bob"]:
+            self.assertIn(text, decision_text)
+            self.assertIn(text, reply_text)
+        self.assertIn("+08:00", decision_text)
+        self.assertIn("本轮合并了 3 条", decision_text)
+        self.assertIn("本轮合并了 3 条", reply_text)
+        saved = self.histories[events[0].unified_msg_origin]
+        self.assertEqual([m["role"] for m in saved], ["user"] * 3 + ["assistant"])
+        for text in ["第一句", "第二句", "第三句"]:
+            self.assertEqual(json.dumps(saved, ensure_ascii=False).count(text), 1)
+        self.assertNotIn("MEMORY", json.dumps(saved))
+        self.assertNotIn("本轮合并", json.dumps(saved, ensure_ascii=False))
+
+    async def test_one_batch_changes_activity_only_once_and_silence_preserves_all_messages(
+        self,
+    ):
+        self.enable_batching()
+        self.config["reply_activity"] = 0.6
+        self.probability = 0.6
+        events = [make_event(f"part-{i}") for i in range(3)]
+        await asyncio.wait_for(asyncio.gather(*(self.dispatch(e) for e in events)), 2)
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.reply_calls, [])
+        decision = events[-1].get_extra("reply_gate_decision")
+        self.assertAlmostEqual(decision["accumulation_remaining"], 0.8109302162)
+        saved = self.histories[events[0].unified_msg_origin]
+        self.assertEqual([m["role"] for m in saved], ["user"] * 3)
+        await self.dispatch(make_event("next batch"))
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(len(self.reply_calls), 1)
+
+    async def test_busy_messages_form_one_next_batch_and_earlier_mention_bypasses_gate(
+        self,
+    ):
+        self.enable_batching()
+        self.reply_release = asyncio.Event()
+        first = asyncio.create_task(self.dispatch(make_event("first")))
+        await asyncio.wait_for(self.reply_started.wait(), 1)
+        events = [
+            make_event("mention in middle", mention=True, sender="alice"),
+            make_event("new topic", sender="bob"),
+            make_event("last detail", sender="alice"),
+        ]
+        tasks = [asyncio.create_task(self.dispatch(e)) for e in events]
+        await asyncio.sleep(0.2)
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(len(self.reply_calls), 1)
+        self.assertFalse(any(t.done() for t in tasks))
+        self.reply_release.set()
+        await asyncio.wait_for(asyncio.gather(first, *tasks), 2)
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(len(self.reply_calls), 2)
+        self.assertEqual(
+            events[-1].get_extra("reply_gate_decision")["source"], "mention"
+        )
+        self.assertIn("new topic", json.dumps(self.reply_calls[-1]))
+        self.assertIn("last detail", json.dumps(self.reply_calls[-1]))
+        self.assertEqual(len(self.histories[events[0].unified_msg_origin]), 6)
+
+    async def test_earlier_image_and_quote_remain_visible_in_shared_visual_request(
+        self,
+    ):
+        from astrbot.api.message_components import Image, Reply
+
+        self.enable_batching()
+        first = make_event("image from alice", sender="alice")
+        first.message_obj.message.append(
+            Image.fromBase64(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jewAAAABJRU5ErkJggg=="
+            )
+        )
+        first.message_obj.message.append(
+            Reply(
+                id="quote",
+                message_str="quoted original",
+                chain=[Plain("quoted original")],
+            )
+        )
+        second = make_event("bob asks about it", sender="bob")
+        await asyncio.wait_for(
+            asyncio.gather(self.dispatch(first), self.dispatch(second)), 3
+        )
+        self.assertEqual(self.requests, [])
+        self.assertEqual(len(self.vision_calls), 1)
+        self.assertEqual(len(self.reply_calls), 1)
+        self.assertIn(
+            "最后 2 条用户消息", self.vision_calls[0]["contexts"][-1]["content"]
+        )
+        for payload in [
+            self.vision_calls[0],
+            self.reply_calls[0],
+            self.histories[first.unified_msg_origin],
+        ]:
+            text = json.dumps(payload)
+            self.assertIn("image_url", text)
+            self.assertIn("data:image/png;base64,", text)
+            self.assertIn("quoted original", text)
+            self.assertIn("bob asks about it", text)
+
+    async def test_saved_merge_settings_survive_upgrade_and_receive_defaults(self):
+        schema = json.loads(
+            (Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text()
+        )
+        for previous in [{}, {"merge_idle_seconds": 2.5, "merge_max_wait_seconds": 8}]:
+            with (
+                self.subTest(previous=previous),
+                tempfile.TemporaryDirectory() as folder,
+            ):
+                path = Path(folder) / "plugin.json"
+                old = {
+                    "reply_activity": 0.35,
+                    "bailian_api_key": "test-only-fake-key",
+                    **previous,
+                }
+                path.write_text(json.dumps(old))
+                saved = AstrBotConfig(str(path), schema=schema)
+                self.assertEqual(
+                    saved["merge_idle_seconds"], previous.get("merge_idle_seconds", 1)
+                )
+                self.assertEqual(
+                    saved["merge_max_wait_seconds"],
+                    previous.get("merge_max_wait_seconds", 3),
+                )
+                self.assertEqual(saved["reply_activity"], 0.35)
+                self.assertEqual(saved["bailian_api_key"], old["bailian_api_key"])
+
+    async def test_real_scheduler_internal_runner_sender_and_cleanup_coalesce_busy_followups(
+        self,
+    ):
+        from astrbot.core.astr_main_agent import collect_initial_request
+        from astrbot.core.pipeline.respond.stage import RespondStage
+        from astrbot.core.pipeline.scheduler import PipelineScheduler
+
+        self.enable_batching(idle=0.03, maximum=0.1)
+        self.astr_config["provider_settings"]["streaming_response"] = False
+        self.astr_config["platform_settings"]["segmented_reply"]["enable"] = False
+        internal = InternalAgentSubStage()
+        await internal.initialize(self.pipeline_context)
+        self.process_stage.agent_sub_stage = SimpleNamespace(
+            process=lambda event: internal.process(event, "")
+        )
+        respond = RespondStage()
+        await respond.initialize(self.pipeline_context)
+        scheduler = PipelineScheduler(self.pipeline_context)
+        scheduler.stages = [self.waking, self.process_stage, respond]
+        started, release = asyncio.Event(), asyncio.Event()
+        sent = []
+
+        async def build(*, event, plugin_context, config, **kwargs):
+            req, _ = await collect_initial_request(event, plugin_context, config)
+            req.system_prompt = "PERSONA"
+            req.extra_user_content_parts = copy.deepcopy(self.extra_parts)
+            provider = MagicMock(spec=Provider)
+            provider.provider_config = {
+                "id": "test",
+                "modalities": ["text", "image"],
+                "max_context_tokens": 128000,
+            }
+            provider.get_model.return_value = "test"
+            provider.meta.return_value = ProviderMeta("test", "test", "test", None)
+
+            async def chat(**kwargs):
+                self.reply_calls.append({"contexts": copy.deepcopy(kwargs["contexts"])})
+                started.set()
+                await release.wait()
+                return LLMResponse(role="assistant", completion_text="merged reply")
+
+            provider.text_chat = AsyncMock(side_effect=chat)
+            runner = ToolLoopAgentRunner()
+            reset = runner.reset(
+                provider=provider,
+                request=req,
+                run_context=ContextWrapper(context=SimpleNamespace(event=event)),
+                tool_executor=MagicMock(),
+                agent_hooks=BaseAgentRunHooks(),
+            )
+            return SimpleNamespace(
+                agent_runner=runner,
+                provider_request=req,
+                provider=provider,
+                reset_coro=reset,
+            )
+
+        def incoming(text, mention=False):
+            e = make_event(text, mention=mention)
+            e.message_obj.message_id = text
+
+            async def send(chain):
+                sent.append(chain)
+                e._has_send_oper = True
+
+            e.send = AsyncMock(side_effect=send)
+            return e
+
+        module = "astrbot.core.pipeline.process_stage.method.agent_sub_stages.internal"
+        with (
+            patch(module + ".build_main_agent", side_effect=build),
+            patch(module + "._record_internal_agent_stats", new=AsyncMock()),
+            patch(module + ".Metric.upload", new=AsyncMock()),
+            patch.object(
+                ToolLoopAgentRunner,
+                "follow_up",
+                side_effect=AssertionError("unbatched follow-up"),
+            ),
+        ):
+            first = incoming("initial")
+            active = asyncio.create_task(scheduler.execute(first))
+            await asyncio.wait_for(started.wait(), 2)
+            early = incoming("second", mention=True)
+            latest = incoming("third")
+            pending = [
+                asyncio.create_task(scheduler.execute(e)) for e in [early, latest]
+            ]
+            await asyncio.sleep(0.15)
+            self.assertEqual(len(self.reply_calls), 1)
+            self.assertEqual(sent, [])
+            release.set()
+            await asyncio.wait_for(asyncio.gather(active, *pending), 3)
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(len(self.reply_calls), 2)
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(latest.get_extra("reply_gate_decision")["source"], "mention")
+        saved = self.histories[first.unified_msg_origin]
+        self.assertEqual(
+            [m["role"] for m in saved],
+            ["user", "assistant", "user", "user", "assistant"],
+        )
+        self.assertEqual(self.plugin._batcher._heads, {})
+        # A declined native run never reaches sending hooks; scheduler cleanup
+        # must still release the batch so a subsequent mention can run.
+        self.probability = 0.1
+        silent = incoming("native silent turn")
+        with (
+            patch(module + ".build_main_agent", side_effect=build),
+            patch(module + "._record_internal_agent_stats", new=AsyncMock()),
+            patch(module + ".Metric.upload", new=AsyncMock()),
+        ):
+            await asyncio.wait_for(scheduler.execute(silent), 2)
+            self.assertTrue(silent.is_stopped())
+            self.assertEqual(self.plugin._batcher._heads, {})
+            await asyncio.wait_for(
+                scheduler.execute(incoming("mention after silence", True)), 2
+            )
+        self.assertEqual(len(sent), 3)
+
+    async def test_merged_mention_bypasses_zero_activity_and_missing_key(self):
+        self.enable_batching()
+        self.config.update(
+            reply_activity=0, bailian_api_key="", failure_default_reply=False
+        )
+        events = [
+            make_event("", mention=True),
+            make_event("details from another member", sender="bob"),
+        ]
+        await asyncio.wait_for(asyncio.gather(*(self.dispatch(e) for e in events)), 2)
+        self.assertEqual(self.requests, [])
+        self.assertEqual(len(self.reply_calls), 1)
+        self.assertEqual(
+            events[-1].get_extra("reply_gate_decision")["source"], "mention"
+        )
+
+    async def test_failed_closed_batch_preserves_all_messages_and_releases_next_batch(
+        self,
+    ):
+        self.enable_batching()
+        self.status = 503
+        self.config["failure_default_reply"] = False
+        events = [make_event("first failed part"), make_event("second failed part")]
+        await asyncio.wait_for(asyncio.gather(*(self.dispatch(e) for e in events)), 2)
+        self.assertEqual(self.reply_calls, [])
+        self.assertEqual(len(self.histories[events[0].unified_msg_origin]), 2)
+        self.assertEqual(self.plugin._batcher._heads, {})
+        self.status = 200
+        await self.dispatch(make_event("recovered"))
+        self.assertEqual(len(self.reply_calls), 1)
+        self.assertIn("first failed part", json.dumps(self.requests[-1]))
+        self.assertIn("second failed part", json.dumps(self.requests[-1]))
+
+    async def test_commands_and_empty_events_do_not_wait_or_take_batch_ownership(self):
+        from astrbot.core.star.filter.command import CommandFilter
+
+        self.config.update(merge_idle_seconds=10, merge_max_wait_seconds=30)
+        command = make_event("/help")
+        command.set_extra(
+            "activated_handlers",
+            [SimpleNamespace(event_filters=[CommandFilter("help")])],
+        )
+        await asyncio.wait_for(self.plugin.observe_message(command), 0.2)
+        self.assertIsNone(command.get_extra("reply_gate_batch_member"))
+        empty = make_event("")
+        await asyncio.wait_for(self.plugin.observe_message(empty), 0.2)
+        self.assertIsNone(empty.get_extra("reply_gate_batch_member"))

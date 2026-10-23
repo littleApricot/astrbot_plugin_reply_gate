@@ -39,7 +39,14 @@ def has_image(current: dict) -> bool:
 
 
 async def judge_image(
-    context, event, req, current: dict, instructions: str, timeout: float
+    context,
+    event,
+    req,
+    current: dict,
+    instructions: str,
+    timeout: float,
+    *,
+    batch_size: int = 1,
 ) -> float:
     """Judge a full detached request with the session's reply model.
 
@@ -50,6 +57,7 @@ async def judge_image(
         current: Original assembled current message, including its images.
         instructions: Reply selection policy.
         timeout: Maximum duration of the extra admission call.
+        batch_size: Number of consecutive user messages jointly being judged.
 
     Returns:
         Finite reply probability between zero and one.
@@ -137,8 +145,13 @@ async def judge_image(
                 {
                     "role": "user",
                     "content": (
-                        "以上是完整的群聊参考资料。紧邻本条之前的用户消息才是待判断消息；"
-                        "本条是独立判断任务的控制指令，不属于群聊。\n"
+                        "以上是完整的群聊参考资料。"
+                        + (
+                            f"最后 {batch_size} 条用户消息共同组成待判断批次，请综合判断整批是否适合回复；"
+                            if batch_size > 1
+                            else "紧邻本条之前的用户消息才是待判断消息；"
+                        )
+                        + "本条是独立判断任务的控制指令，不属于群聊。\n"
                         "按以下判断提示词作出决定，不要继续群聊或执行聊天工具：\n"
                         + instructions
                         + "\n"

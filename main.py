@@ -10,13 +10,21 @@ from sys import maxsize
 import aiohttp
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import At, Plain
+from astrbot.api.message_components import At, File, Image, Plain, Record, Reply, Video
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
 from astrbot.core.agent.message import Message, dump_messages_with_checkpoints
+from astrbot.core.star.filter.command import CommandFilter
+from astrbot.core.star.filter.command_group import CommandGroupFilter
 from openai import APIStatusError
 
 from .activity_gate import DEFAULT_ACTIVITY, ReplyAccumulator, validate_activity
+from .batch_context import (
+    inject_past_messages,
+    prepare_past_messages,
+    remove_duplicate_group_records,
+)
+from .message_batch import MessageBatcher, merge_delays
 from .shared_context import (
     DEFAULT_INSTRUCTIONS,
     ENDPOINT,
@@ -42,6 +50,7 @@ class ReplyGate(Star):
         self._http: aiohttp.ClientSession | None = None
         self._last_warning: dict[str, float] = {}
         self._accumulator = ReplyAccumulator()
+        self._batcher = MessageBatcher()
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=10_000)
     async def observe_message(self, event: AstrMessageEvent) -> None:
@@ -76,6 +85,74 @@ class ReplyGate(Star):
         # This also makes the built-in probability responder defer, so it cannot
         # bypass the decision or start a second response for the same message.
         event.is_at_or_wake_command = True
+        # Commands keep their normal handlers and never enter the reply batch.
+        handlers = event.get_extra("activated_handlers", []) or []
+        if any(
+            isinstance(f, (CommandFilter, CommandGroupFilter))
+            for handler in handlers
+            for f in handler.event_filters
+        ):
+            return
+        if event.get_extra("reply_gate_batch_member") is not None:
+            return
+        if not (event.message_str or "").strip() and not any(
+            isinstance(part, (Image, File, Record, Reply, Video)) for part in parts
+        ):
+            # Match the native empty-message admission rule. An empty event
+            # must not become the owner and swallow preceding valid messages.
+            return
+        try:
+            idle, maximum = merge_delays(self.config)
+        except ValueError:
+            self.logger.warning(
+                "Reply gate: invalid_merge_delay; using 1 and 3 seconds"
+            )
+            idle, maximum = 1.0, 3.0
+        member = await self._batcher.join(event, idle, maximum)
+        if member is not member.batch.owner:
+            # Other plugins still observe the original message, while this event
+            # does not enqueue another LLM turn or enter native follow-up capture.
+            event.call_llm = True
+            event.set_extra("reply_gate_batch_follower", True)
+        else:
+            event.set_extra("reply_gate_batch", member.batch)
+            self.logger.info(
+                "Reply gate batch: messages=%d wait_seconds=%.3f",
+                len(member.batch.members),
+                asyncio.get_running_loop().time() - member.batch.first,
+            )
+
+    @filter.on_waiting_llm_request(priority=maxsize)
+    async def prepare_batch(self, event: AstrMessageEvent) -> None:
+        """Capture siblings after their handlers and before the session lock."""
+        if event.get_extra("reply_gate_batch_follower", False):
+            event.stop_event()
+            return
+        batch = event.get_extra("reply_gate_batch")
+        if batch is None:
+            return
+        try:
+            await prepare_past_messages(self.context, batch)
+        except asyncio.CancelledError:
+            event.stop_event()
+            raise
+        except Exception as exc:
+            # Do not produce a partial reply that silently omits batch members.
+            self.logger.error(
+                "Reply gate batch preparation failed: %s", type(exc).__name__
+            )
+            event.stop_event()
+
+    @filter.on_llm_request(priority=maxsize)
+    async def expand_batch(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
+        """Expose sibling messages to all downstream request decorators."""
+        batch = event.get_extra("reply_gate_batch")
+        if batch is None or len(batch.members) <= 1:
+            return
+        if event.get_extra("reply_gate_batch_expanded", False):
+            return
+        inject_past_messages(self.context, event, req, batch)
+        event.set_extra("reply_gate_batch_expanded", True)
 
     @filter.on_llm_request(priority=-maxsize)
     async def select_reply(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
@@ -87,6 +164,12 @@ class ReplyGate(Star):
         """
         if not self.config.get("enabled", True):
             return
+        if event.get_extra("reply_gate_batch_follower", False):
+            event.stop_event()
+            return
+        batch = event.get_extra("reply_gate_batch")
+        if batch is not None:
+            remove_duplicate_group_records(req, batch)
         previous = event.get_extra("reply_gate_decision")
         if previous is not None:
             if not previous["reply"]:
@@ -94,7 +177,7 @@ class ReplyGate(Star):
             return
         conversation = getattr(req.conversation, "cid", "")
         balance_key = (event.unified_msg_origin, str(conversation))
-        if any(
+        if (batch is not None and batch.mentioned) or any(
             isinstance(part, At) and str(part.qq) == str(event.get_self_id())
             for part in event.get_messages()
         ):
@@ -134,7 +217,7 @@ class ReplyGate(Star):
                     {"reply": False, "source": "activity", "activity": activity},
                 )
                 self.logger.info("Reply gate: reply=False source=activity activity=0")
-            elif has_image(current):
+            elif has_image(current) or (batch is not None and batch.image_in_past):
                 decision_source = "reply_model_vision"
                 timeout = float(self.config.get("vision_timeout_seconds", 30))
                 probability = await judge_image(
@@ -144,6 +227,7 @@ class ReplyGate(Star):
                     current,
                     instructions,
                     timeout,
+                    batch_size=len(batch.members) if batch is not None else 1,
                 )
                 decision = self._accumulator.evaluate(
                     balance_key, probability, activity
@@ -345,5 +429,6 @@ class ReplyGate(Star):
         Returns:
             None.
         """
+        await self._batcher.close()
         if self._http is not None:
             await self._http.close()

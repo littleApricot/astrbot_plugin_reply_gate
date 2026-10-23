@@ -30,6 +30,8 @@ class UpdateSourceTests(unittest.IsolatedAsyncioTestCase):
             for name in [
                 "main.py",
                 "activity_gate.py",
+                "message_batch.py",
+                "batch_context.py",
                 "shared_context.py",
                 "vision_gate.py",
                 "__init__.py",
