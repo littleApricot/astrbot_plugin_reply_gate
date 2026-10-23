@@ -35,5 +35,15 @@
     "repo": "https://github.com/littleApricot/astrbot_plugin_self_prompt",
     "download_url": "https://github.com/littleApricot/astrbot_plugin_self_prompt/archive/refs/tags/v0.3.0.zip",
     "astrbot_version": ">=4.29.1,<4.30.0"
+  },
+  "littleApricot/astrbot_plugin_self_balance": {
+    "author": "littleApricot",
+    "name": "astrbot_plugin_self_balance",
+    "display_name": "自查余额",
+    "desc": "让机器人通过工具查询当前 DeepSeek 账户的真实余额，复用已有模型配置。",
+    "version": "v0.1.0",
+    "repo": "https://github.com/littleApricot/astrbot_plugin_self_balance",
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_self_balance/archive/refs/tags/v0.1.0.zip",
+    "astrbot_version": ">=4.29.1,<4.30.0"
   }
 }
