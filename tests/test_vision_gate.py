@@ -31,6 +31,118 @@ def event_and_context(provider):
 
 
 class VisionProtocolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_deepseek_uses_one_typed_result_with_full_context_and_no_execution(
+        self,
+    ):
+        config = {
+            "id": "test",
+            "type": "openai_chat_completion",
+            "model": "deepseek-flash",
+            "key": ["test-only-fake-key"],
+            "api_base": "https://api.deepseek.com",
+            "custom_extra_body": {
+                "thinking": {"type": "enabled"},
+                "reasoning_effort": "high",
+                "seed": 123,
+            },
+        }
+        provider = ProviderOpenAIOfficial(config, {})
+        event, context = event_and_context(provider)
+        req = ProviderRequest(
+            contexts=[{"role": "user", "content": "OLD" * 4000}],
+            system_prompt="PERSONA and memory; normal chat uses meme_search.",
+        )
+        current = image_message()
+        original_req, original_current, original_config = copy.deepcopy(
+            (req, current, config)
+        )
+        cases = [
+            ("submit_reply_decision", '{"should_reply":true}', True),
+            ("submit_reply_decision", '{"should_reply":false}', False),
+            ("meme_search", '{"should_reply":true}', "invalid_vision_decision"),
+            (
+                "submit_reply_decision",
+                '{"should_reply":"false"}',
+                "invalid_vision_schema",
+            ),
+            (
+                "submit_reply_decision",
+                '{"should_reply":true,"extra":1}',
+                "invalid_vision_schema",
+            ),
+        ]
+        try:
+            for name, arguments, expected in cases:
+                response = ChatCompletion(
+                    id="test-result",
+                    created=0,
+                    model="deepseek-flash",
+                    object="chat.completion",
+                    choices=[
+                        {
+                            "index": 0,
+                            "finish_reason": "tool_calls",
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "decision-1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": name,
+                                            "arguments": arguments,
+                                        },
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                )
+                create = AsyncMock(return_value=response)
+                provider.client.chat.completions.create = create
+                with self.subTest(name=name, arguments=arguments):
+                    call = judge_image(context, event, req, current, "rule", 5)
+                    if isinstance(expected, bool):
+                        self.assertIs(await call, expected)
+                    else:
+                        with self.assertRaisesRegex(ValueError, expected):
+                            await call
+                    create.assert_awaited_once()
+                    payload = create.await_args.kwargs
+                    self.assertEqual(
+                        [t["function"]["name"] for t in payload["tools"]],
+                        ["submit_reply_decision"],
+                    )
+                    self.assertEqual(
+                        payload["tool_choice"],
+                        {
+                            "type": "function",
+                            "function": {"name": "submit_reply_decision"},
+                        },
+                    )
+                    self.assertEqual(
+                        payload["extra_body"]["thinking"], {"type": "disabled"}
+                    )
+                    self.assertNotIn("response_format", payload["extra_body"])
+                    self.assertNotIn("reasoning_effort", payload["extra_body"])
+                    self.assertIn("OLD" * 4000, str(payload["messages"]))
+                    self.assertIn("data:image/png;base64,", str(payload["messages"]))
+                    self.assertEqual(provider.provider_config, original_config)
+                    self.assertEqual(req, original_req)
+                    self.assertEqual(current, original_current)
+            formal_response = response.model_copy(deep=True)
+            formal_response.choices[0].message.content = "formal reply"
+            formal_response.choices[0].message.tool_calls = None
+            formal_response.choices[0].finish_reason = "stop"
+            create.return_value = formal_response
+            await provider.text_chat(prompt="formal reply", func_tool=None)
+            self.assertEqual(
+                create.await_args.kwargs["extra_body"], config["custom_extra_body"]
+            )
+        finally:
+            await provider.client.close()
+
     async def test_strict_boolean_json_with_optional_complete_fence(self):
         provider = SimpleNamespace(
             provider_config={"modalities": ["image"]}, text_chat=AsyncMock()

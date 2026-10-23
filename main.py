@@ -14,6 +14,7 @@ from astrbot.api.message_components import At, Plain
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
 from astrbot.core.agent.message import Message, dump_messages_with_checkpoints
+from openai import APIStatusError
 
 from .shared_context import (
     DEFAULT_INSTRUCTIONS,
@@ -221,6 +222,8 @@ class ReplyGate(Star):
                     else type(exc).__name__
                 )
             )
+            if isinstance(exc, APIStatusError):
+                reason = f"provider_http_{exc.status_code}"
             event.set_extra(
                 "reply_gate_decision",
                 {

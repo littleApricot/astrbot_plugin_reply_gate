@@ -7,6 +7,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 from aiohttp import web
 from astrbot.api.message_components import At, Plain
 from astrbot.core.agent.hooks import BaseAgentRunHooks
@@ -40,6 +41,7 @@ from astrbot_plugin_reply_gate.shared_context import (
     fit_context,
     parse_probability,
 )
+from openai import APIStatusError
 
 
 def make_event(
@@ -732,6 +734,29 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             await self.plugin.select_reply(cancelled, req)
         self.assertTrue(cancelled.is_stopped())
         self.assertEqual(len(self.reply_calls), 1)
+
+    async def test_vision_http_error_logs_only_status_and_passes_original_request(self):
+        self.extra_parts.append(
+            ImageURLPart(
+                image_url=ImageURLPart.ImageURL(url="data:image/png;base64,dGVzdA==")
+            )
+        )
+        self.vision_provider.text_chat.side_effect = APIStatusError(
+            "private-provider-error-body",
+            response=httpx.Response(
+                402, request=httpx.Request("POST", "https://example.invalid")
+            ),
+            body={"private": "private-provider-error-body"},
+        )
+        with self.assertLogs(self.plugin.logger, level="WARNING") as logs:
+            e = await self.dispatch(make_event("image"))
+        self.assertFalse(e.is_stopped())
+        self.assertEqual(
+            e.get_extra("reply_gate_decision")["reason"], "provider_http_402"
+        )
+        self.assertNotIn("private-provider-error-body", str(logs.output))
+        self.assertEqual(len(self.reply_calls), 1)
+        self.assertEqual(self.prepared_requests[-1], self.request_snapshots[-1])
 
     async def test_histories_are_isolated_by_conversation(self):
         self.probability = 0.1
