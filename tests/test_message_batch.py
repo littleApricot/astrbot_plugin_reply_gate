@@ -60,7 +60,7 @@ class BatchingTests(unittest.IsolatedAsyncioTestCase):
         for e in events:
             e.cleanup_temporary_local_files()
 
-    async def test_messages_during_reply_are_one_next_batch_and_wait_for_full_cleanup(
+    async def test_new_batch_starts_while_previous_reply_is_still_running(
         self,
     ):
         active = event()
@@ -70,17 +70,28 @@ class BatchingTests(unittest.IsolatedAsyncioTestCase):
             asyncio.create_task(self.batcher.join(e, 0.02, 0.04)) for e in new_events
         ]
         await asyncio.sleep(0.07)
-        self.assertFalse(any(t.done() for t in tasks))
-        self.assertEqual(len(self.batcher._heads), 1)
-        self.assertEqual(len(self.batcher._pending), 1)
-        active.cleanup_temporary_local_files()
+        self.assertTrue(all(t.done() for t in tasks))
+        self.assertEqual(len(self.batcher._active), 2)
+        self.assertFalse(original.batch.done.is_set())
         members = await asyncio.wait_for(asyncio.gather(*tasks), 0.3)
-        self.assertTrue(original.batch.done.is_set())
         self.assertEqual(len(members[0].batch.members), 5)
         self.assertTrue(all(m.batch is members[0].batch for m in members))
         self.assertIs(members[-1].batch.owner, members[-1])
         for e in new_events:
             e.cleanup_temporary_local_files()
+        self.assertFalse(original.batch.done.is_set())
+        active.cleanup_temporary_local_files()
+
+    async def test_many_ready_batches_have_no_parallel_limit(self):
+        events = [event() for _ in range(32)]
+        members = []
+        for e in events:
+            members.append(await asyncio.wait_for(self.batcher.join(e, 0, 0), 0.2))
+        self.assertEqual(len({m.batch for m in members}), 32)
+        self.assertEqual(len(self.batcher._active), 32)
+        for e in reversed(events):
+            e.cleanup_temporary_local_files()
+        self.assertEqual(self.batcher._active, set())
 
     async def test_different_sessions_collect_independently(self):
         first, other = event("a"), event("b")

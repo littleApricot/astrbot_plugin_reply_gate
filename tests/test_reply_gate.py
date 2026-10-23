@@ -266,7 +266,14 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.context = SimpleNamespace(
             get_config=lambda *args, **kwargs: self.astr_config,
             conversation_manager=SimpleNamespace(
-                update_conversation=AsyncMock(side_effect=self.save_history)
+                update_conversation=AsyncMock(side_effect=self.save_history),
+                get_conversation=AsyncMock(
+                    side_effect=lambda origin, cid: SimpleNamespace(
+                        cid=cid,
+                        history=json.dumps(self.histories.get(origin, [])),
+                        token_usage=0,
+                    )
+                ),
             ),
         )
         self.vision_provider = MagicMock(spec=Provider)
@@ -781,7 +788,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             event.get_extra("reply_gate_decision")["source"], "error_fallback"
         )
 
-    async def test_text_timeout_passes_original_request_once_and_saves_once(self):
+    async def test_text_timeout_passes_once_and_preserves_each_message_once(self):
         self.config["timeout_seconds"] = 0.01
         self.delay = 0.1
         e = make_event("timeout current")
@@ -800,7 +807,9 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         saved = self.histories[e.unified_msg_origin]
         self.assertEqual(saved[:1], original)
         self.assertEqual(len(saved), 3)
-        self.context.conversation_manager.update_conversation.assert_awaited_once()
+        self.assertEqual(
+            self.context.conversation_manager.update_conversation.await_count, 2
+        )
 
     async def test_invalid_or_empty_decision_result_passes(self):
         for index, body in enumerate(
@@ -871,7 +880,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(
                         self.context.conversation_manager.update_conversation.await_count
                         - saves_before,
-                        1,
+                        2 if fallback else 1,
                     )
 
     async def test_image_failures_follow_policy_and_retain_full_unsent_images(self):
@@ -942,7 +951,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(
                         self.context.conversation_manager.update_conversation.await_count
                         - saves_before,
-                        1,
+                        2 if fallback else 1,
                     )
         self.assertEqual(self.requests, [])
 
@@ -1303,7 +1312,41 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.requests), 2)
         self.assertEqual(len(self.reply_calls), 1)
 
-    async def test_busy_messages_form_one_next_batch_and_earlier_mention_bypasses_gate(
+    async def test_judgments_for_eight_batches_start_without_waiting_for_previous_results(
+        self,
+    ):
+        self.enable_batching(idle=0.005, maximum=0.01)
+        self.delay = 0.5
+        tasks = []
+        for i in range(8):
+            tasks.append(
+                asyncio.create_task(self.dispatch(make_event(f"parallel-{i}")))
+            )
+            for _ in range(100):
+                if len(self.requests) == i + 1:
+                    break
+                await asyncio.sleep(0.001)
+            self.assertEqual(len(self.requests), i + 1)
+        self.assertEqual(self.reply_calls, [])
+        self.assertEqual(self.plugin._http.connector.limit, 0)
+        await asyncio.wait_for(asyncio.gather(*tasks), 3)
+        self.assertEqual(len(self.reply_calls), 8)
+        saved = json.dumps(self.histories[make_event().unified_msg_origin])
+        for i in range(8):
+            self.assertEqual(saved.count(f"parallel-{i}"), 1)
+
+    async def test_parallel_history_failure_stops_before_judgment_or_generation(self):
+        self.context.conversation_manager.update_conversation.side_effect = (
+            RuntimeError("private-database-message")
+        )
+        with self.assertLogs(self.plugin.logger, level="ERROR") as logs:
+            event = await self.dispatch(make_event("hello"))
+        self.assertTrue(event.is_stopped())
+        self.assertEqual(self.requests, [])
+        self.assertEqual(self.reply_calls, [])
+        self.assertNotIn("private-database-message", str(logs.output))
+
+    async def test_busy_messages_start_parallel_batch_and_earlier_mention_bypasses_gate(
         self,
     ):
         self.enable_batching()
@@ -1318,8 +1361,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         tasks = [asyncio.create_task(self.dispatch(e)) for e in events]
         await asyncio.sleep(0.2)
         self.assertEqual(len(self.requests), 1)
-        self.assertEqual(len(self.reply_calls), 1)
-        self.assertFalse(any(t.done() for t in tasks))
+        self.assertEqual(len(self.reply_calls), 2)
+        self.assertFalse(tasks[-1].done())
         self.reply_release.set()
         await asyncio.wait_for(asyncio.gather(first, *tasks), 2)
         self.assertEqual(len(self.requests), 1)
@@ -1398,7 +1441,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(saved["reply_activity"], 0.35)
                 self.assertEqual(saved["bailian_api_key"], old["bailian_api_key"])
 
-    async def test_real_scheduler_internal_runner_sender_and_cleanup_coalesce_busy_followups(
+    async def test_real_scheduler_runs_batches_in_parallel_without_followup_capture(
         self,
     ):
         from astrbot.core.astr_main_agent import collect_initial_request
@@ -1436,7 +1479,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             async def chat(**kwargs):
                 self.reply_calls.append({"contexts": copy.deepcopy(kwargs["contexts"])})
                 started.set()
-                await release.wait()
+                if event.message_str == "initial":
+                    await release.wait()
                 return LLMResponse(role="assistant", completion_text="merged reply")
 
             provider.text_chat = AsyncMock(side_effect=chat)
@@ -1486,8 +1530,11 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 asyncio.create_task(scheduler.execute(e)) for e in [early, latest]
             ]
             await asyncio.sleep(0.15)
-            self.assertEqual(len(self.reply_calls), 1)
-            self.assertEqual(sent, [])
+            self.assertEqual(len(self.reply_calls), 2)
+            await asyncio.wait_for(asyncio.gather(*pending), 2)
+            self.assertEqual(len(sent), 1)
+            self.assertFalse(active.done())
+            self.assertIn("initial", json.dumps(self.reply_calls[1]))
             release.set()
             await asyncio.wait_for(asyncio.gather(active, *pending), 3)
         self.assertEqual(len(self.requests), 1)
@@ -1497,7 +1544,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         saved = self.histories[first.unified_msg_origin]
         self.assertEqual(
             [m["role"] for m in saved],
-            ["user", "assistant", "user", "user", "assistant"],
+            ["user", "user", "user", "assistant", "assistant"],
         )
         self.assertEqual(self.plugin._batcher._heads, {})
         # A declined native run never reaches sending hooks; scheduler cleanup

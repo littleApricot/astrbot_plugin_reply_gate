@@ -31,6 +31,7 @@ class UpdateSourceTests(unittest.IsolatedAsyncioTestCase):
                 "main.py",
                 "activity_gate.py",
                 "message_batch.py",
+                "parallel_runtime.py",
                 "batch_context.py",
                 "shared_context.py",
                 "vision_gate.py",

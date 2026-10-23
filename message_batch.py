@@ -47,7 +47,6 @@ class MessageBatch:
     last: float
     idle: float
     maximum: float
-    previous: MessageBatch | None = None
     members: list[BatchMember] = field(default_factory=list)
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     done: asyncio.Event = field(default_factory=asyncio.Event)
@@ -67,16 +66,15 @@ class MessageBatch:
 
 
 class MessageBatcher:
-    """Keep at most one active and one pending batch per session.
+    """Collect independently of all batches already judging or replying.
 
     AstrBot 4.29's scheduler always invokes event cleanup in its finally block.
-    Use that boundary to release the next batch after sending and history saving,
-    and retain sibling attachments until their shared request has finished.
+    Retain sibling attachments until their own shared request has finished.
     """
 
     def __init__(self) -> None:
         self._heads: dict[str, MessageBatch] = {}
-        self._pending: dict[str, MessageBatch] = {}
+        self._active: set[MessageBatch] = set()
         self._closed = False
 
     async def join(self, event, idle: float, maximum: float) -> BatchMember:
@@ -84,16 +82,12 @@ class MessageBatcher:
             raise asyncio.CancelledError
         now = asyncio.get_running_loop().time()
         head = self._heads.get(event.unified_msg_origin)
-        if head is None:
+        if head is None or head.ready.is_set():
             batch = MessageBatch(event.unified_msg_origin, now, now, idle, maximum)
             self._heads[batch.key] = batch
-        elif not head.ready.is_set():
-            batch = head
+            self._active.add(batch)
         else:
-            batch = self._pending.get(head.key)
-            if batch is None:
-                batch = MessageBatch(head.key, now, now, idle, maximum, previous=head)
-                self._pending[head.key] = batch
+            batch = head
         member = BatchMember(event, batch, event.cleanup_temporary_local_files)
         batch.members.append(member)
         batch.last = now
@@ -108,9 +102,6 @@ class MessageBatcher:
         return member
 
     async def _settle(self, batch: MessageBatch) -> None:
-        if batch.previous is not None:
-            await batch.previous.done.wait()
-            batch.previous = None
         while batch.members:
             delay = min(batch.last + batch.idle, batch.first + batch.maximum)
             delay -= asyncio.get_running_loop().time()
@@ -126,6 +117,8 @@ class MessageBatcher:
             # naturally remains the final user message of the shared request.
             batch.owner = batch.members[-1]
         batch.ready.set()
+        if self._heads.get(batch.key) is batch:
+            self._heads.pop(batch.key, None)
 
     def _event_finished(self, member: BatchMember) -> None:
         batch = member.batch
@@ -152,20 +145,15 @@ class MessageBatcher:
                 member.clean()
         batch.done.set()
         batch.ready.set()
+        self._active.discard(batch)
         if batch.timer is not None and not batch.timer.done():
             batch.timer.cancel()
         if self._heads.get(batch.key) is batch:
-            pending = self._pending.pop(batch.key, None)
-            if pending is None:
-                self._heads.pop(batch.key, None)
-            else:
-                self._heads[batch.key] = pending
-        elif self._pending.get(batch.key) is batch:
-            self._pending.pop(batch.key, None)
+            self._heads.pop(batch.key, None)
 
     async def close(self) -> None:
         self._closed = True
-        batches = set(self._heads.values()) | set(self._pending.values())
+        batches = set(self._active)
         timers = [b.timer for b in batches if b.timer is not None]
         for batch in batches:
             self._finish(batch)

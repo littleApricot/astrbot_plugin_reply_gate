@@ -25,6 +25,7 @@ from .batch_context import (
     remove_duplicate_group_records,
 )
 from .message_batch import MessageBatcher, merge_delays
+from .parallel_runtime import ParallelRuntime
 from .shared_context import (
     DEFAULT_INSTRUCTIONS,
     ENDPOINT,
@@ -51,6 +52,7 @@ class ReplyGate(Star):
         self._last_warning: dict[str, float] = {}
         self._accumulator = ReplyAccumulator()
         self._batcher = MessageBatcher()
+        self._parallel = ParallelRuntime(context)
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=10_000)
     async def observe_message(self, event: AstrMessageEvent) -> None:
@@ -116,6 +118,7 @@ class ReplyGate(Star):
             event.set_extra("reply_gate_batch_follower", True)
         else:
             event.set_extra("reply_gate_batch", member.batch)
+            self._parallel.enter(event)
             self.logger.info(
                 "Reply gate batch: messages=%d wait_seconds=%.3f",
                 len(member.batch.members),
@@ -147,11 +150,24 @@ class ReplyGate(Star):
     async def expand_batch(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
         """Expose sibling messages to all downstream request decorators."""
         batch = event.get_extra("reply_gate_batch")
-        if batch is None or len(batch.members) <= 1:
+        if batch is None:
             return
         if event.get_extra("reply_gate_batch_expanded", False):
             return
-        inject_past_messages(self.context, event, req, batch)
+        base_length = len(req.contexts)
+        if len(batch.members) > 1:
+            inject_past_messages(self.context, event, req, batch)
+        try:
+            await self._parallel.prepare(event, req, base_length)
+        except asyncio.CancelledError:
+            event.stop_event()
+            raise
+        except Exception as exc:
+            self.logger.error(
+                "Reply gate parallel history preparation failed: %s", type(exc).__name__
+            )
+            event.stop_event()
+            return
         event.set_extra("reply_gate_batch_expanded", True)
 
     @filter.on_llm_request(priority=-maxsize)
@@ -283,7 +299,9 @@ class ReplyGate(Star):
                 if not endpoint:
                     raise ValueError("api_url_missing")
                 if self._http is None or self._http.closed:
-                    self._http = aiohttp.ClientSession()
+                    self._http = aiohttp.ClientSession(
+                        connector=aiohttp.TCPConnector(limit=0)
+                    )
                 async with self._http.post(
                     endpoint,
                     # Match the Authorization value in the user's console example.
@@ -403,7 +421,12 @@ class ReplyGate(Star):
                 return
 
         event.stop_event()
-        if req.conversation and current is not None:
+        parallel = event.get_extra("reply_gate_parallel")
+        if (
+            req.conversation
+            and current is not None
+            and not (parallel is not None and parallel.admitted is not None)
+        ):
             # AstrBot consumes pending group context while assembling a request.
             # Preserve this unsent user turn so the next decision can still see it.
             try:
@@ -430,5 +453,6 @@ class ReplyGate(Star):
             None.
         """
         await self._batcher.close()
+        self._parallel.close()
         if self._http is not None:
             await self._http.close()
