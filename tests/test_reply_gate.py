@@ -277,7 +277,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 role="assistant",
                 completion_text=self.vision_response
                 if self.vision_response is not None
-                else json.dumps({"should_reply": self.vision_decision}),
+                else json.dumps({"probability": float(self.vision_decision)}),
             )
 
         self.vision_provider.text_chat = AsyncMock(side_effect=record_vision)
@@ -474,7 +474,16 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                     saved["failure_default_reply"],
                     True if previous is None else previous,
                 )
-                self.assertEqual({key: saved[key] for key in original}, original)
+                self.assertEqual(
+                    {key: saved[key] for key in original if key != "reply_threshold"},
+                    {
+                        key: value
+                        for key, value in original.items()
+                        if key != "reply_threshold"
+                    },
+                )
+                self.assertNotIn("reply_threshold", saved)
+                self.assertEqual(saved["reply_activity"], 0.5)
 
     async def test_configured_prompt_reaches_text_and_image_judges_only(self):
         custom = "CUSTOM_POLICY: 按当前人格决定是否接话。"
@@ -1023,3 +1032,203 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         await self.dispatch(make_event(sender="bot-1"))
         self.assertEqual(len(self.requests), 0)
         self.assertEqual(len(self.reply_calls), 0)
+
+    async def test_activity_accumulation_and_decrease_use_real_request_and_history_path(
+        self,
+    ):
+        self.config["reply_activity"] = 0.6
+        outcomes = []
+        for score in [0.6, 0.1, 0.6, 0.6]:
+            self.probability = score
+            event = await self.dispatch(make_event(f"message with score {score}"))
+            outcomes.append(event.get_extra("reply_gate_decision"))
+        self.assertEqual([d["reply"] for d in outcomes], [False, False, False, True])
+        self.assertAlmostEqual(outcomes[0]["accumulation_remaining"], 0.8109302162)
+        self.assertEqual(outcomes[1]["accumulation_remaining"], 0)
+        self.assertEqual(outcomes[-1]["accumulation_remaining"], 0)
+        self.assertEqual(len(self.requests), 4)
+        self.assertEqual(len(self.reply_calls), 1)
+        self.assertEqual(self.prepared_requests, self.request_snapshots)
+        saved = self.histories[event.unified_msg_origin]
+        self.assertEqual([m["role"] for m in saved], ["user"] * 4 + ["assistant"])
+        self.assertNotIn("MEMORY", json.dumps(saved))
+        self.assertNotIn("accumulation", json.dumps(saved))
+
+    async def test_activity_endpoints_skip_both_judges_but_mentions_always_pass(self):
+        self.config["bailian_api_key"] = ""
+        self.config["failure_default_reply"] = False
+        for image in [False, True]:
+            self.extra_parts = []
+            if image:
+                self.extra_parts.append(
+                    ImageURLPart(
+                        image_url=ImageURLPart.ImageURL(
+                            url="data:image/png;base64,dGVzdA=="
+                        )
+                    )
+                )
+            for activity in [0, 1]:
+                with self.subTest(image=image, activity=activity):
+                    self.config["reply_activity"] = activity
+                    origin = f"endpoint-{image}-{activity}"
+                    event = await self.dispatch(make_event(session=origin))
+                    self.assertEqual(event.is_stopped(), activity == 0)
+                    self.assertEqual(
+                        event.get_extra("reply_gate_decision")["source"], "activity"
+                    )
+                    saved = self.histories[event.unified_msg_origin]
+                    self.assertEqual(len(saved), 1 if activity == 0 else 2)
+                    mention = await self.dispatch(
+                        make_event(mention=True, session=origin)
+                    )
+                    self.assertFalse(mention.is_stopped())
+                    self.assertEqual(
+                        mention.get_extra("reply_gate_decision")["source"], "mention"
+                    )
+        self.assertEqual(self.requests, [])
+        self.assertEqual(self.vision_calls, [])
+        self.assertEqual(self.prepared_requests, self.request_snapshots)
+
+    async def test_activity_credit_is_shared_by_group_members_and_isolated_between_groups(
+        self,
+    ):
+        self.config["reply_activity"] = 0.6
+        self.probability = 0.6
+        for group in ["a", "b"]:
+            self.assertTrue(
+                (
+                    await self.dispatch(make_event(sender="alice", session=group))
+                ).is_stopped()
+            )
+        for group in ["a", "b"]:
+            self.assertFalse(
+                (
+                    await self.dispatch(make_event(sender="bob", session=group))
+                ).is_stopped()
+            )
+        self.assertEqual(len(self.reply_calls), 2)
+
+    async def test_same_event_hook_does_not_judge_accumulate_or_save_twice(self):
+        self.config["reply_activity"] = 0.6
+        self.probability = 0.6
+        event = await self.dispatch(make_event())
+        saves = self.context.conversation_manager.update_conversation.await_count
+        await self.plugin.select_reply(event, self.prepared_requests[-1])
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(
+            self.context.conversation_manager.update_conversation.await_count, saves
+        )
+        next_event = await self.dispatch(make_event())
+        self.assertFalse(next_event.is_stopped())
+        self.assertEqual(len(self.reply_calls), 1)
+
+    async def test_mention_and_image_decisions_clear_previous_text_credit(self):
+        self.config["reply_activity"] = 0.6
+        self.probability = 0.6
+        self.assertTrue((await self.dispatch(make_event())).is_stopped())
+        self.assertFalse((await self.dispatch(make_event(mention=True))).is_stopped())
+        self.assertTrue((await self.dispatch(make_event())).is_stopped())
+        self.extra_parts.append(
+            ImageURLPart(
+                image_url=ImageURLPart.ImageURL(url="data:image/png;base64,dGVzdA==")
+            )
+        )
+        self.vision_decision = False
+        self.assertTrue((await self.dispatch(make_event())).is_stopped())
+        self.extra_parts = []
+        self.assertTrue((await self.dispatch(make_event())).is_stopped())
+
+    async def test_activity_upgrade_preserves_saved_activity_and_ignores_legacy_threshold(
+        self,
+    ):
+        schema = json.loads(
+            (Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text()
+        )
+        for activity in [None, 0, 0.6, 1]:
+            with (
+                self.subTest(activity=activity),
+                tempfile.TemporaryDirectory() as folder,
+            ):
+                path = Path(folder) / "plugin.json"
+                original = {
+                    "bailian_api_key": "test-only-fake-key",
+                    "bailian_api_url": "https://example.invalid/systemone",
+                    "decision_instructions": "MY_RULES",
+                    "context_budget": 20000,
+                    "failure_default_reply": False,
+                    "reply_threshold": 0.7,
+                }
+                if activity is not None:
+                    original["reply_activity"] = activity
+                path.write_text(json.dumps(original))
+                config = AstrBotConfig(str(path), schema=schema)
+                ReplyGate(self.context, config)
+                saved = json.loads(path.read_text(encoding="utf-8-sig"))
+                self.assertEqual(
+                    saved["reply_activity"], 0.5 if activity is None else activity
+                )
+                self.assertNotIn("reply_threshold", saved)
+                self.assertEqual(
+                    {k: saved[k] for k in original if k != "reply_threshold"},
+                    {k: v for k, v in original.items() if k != "reply_threshold"},
+                )
+
+    async def test_visual_probability_shares_credit_with_text_and_honors_activity(self):
+        image = ImageURLPart(
+            image_url=ImageURLPart.ImageURL(url="data:image/png;base64,dGVzdA==")
+        )
+        self.config["reply_activity"] = 0.6
+        self.vision_decision = 0.6
+        self.extra_parts = [image]
+        first = await self.dispatch(make_event("image"))
+        self.assertTrue(first.is_stopped())
+        self.assertAlmostEqual(
+            first.get_extra("reply_gate_decision")["probability"], 0.6
+        )
+        self.extra_parts = []
+        self.probability = 0.6
+        second = await self.dispatch(make_event("text"))
+        self.assertFalse(second.is_stopped())
+        self.assertEqual(len(self.reply_calls), 1)
+        self.assertEqual(self.prepared_requests, self.request_snapshots)
+        self.extra_parts = [image]
+        for activity, score, expected in [(0.01, 0.9, False), (0.99, 0.1, True)]:
+            self.config["reply_activity"] = activity
+            self.vision_decision = score
+            result = await self.dispatch(make_event("image", session=str(activity)))
+            self.assertIs(result.get_extra("reply_gate_decision")["reply"], expected)
+            self.assertEqual(
+                result.get_extra("reply_gate_decision")["source"], "reply_model_vision"
+            )
+
+    async def test_failed_judgments_do_not_count_and_fallback_reply_clears_credit(self):
+        self.config["reply_activity"] = 0.6
+        self.config["failure_default_reply"] = False
+        self.probability = 0.6
+        self.assertTrue((await self.dispatch(make_event())).is_stopped())
+        self.status = 503
+        self.assertTrue((await self.dispatch(make_event())).is_stopped())
+        self.status = 200
+        self.assertFalse((await self.dispatch(make_event())).is_stopped())
+        self.assertTrue((await self.dispatch(make_event())).is_stopped())
+        self.status = 503
+        self.config["failure_default_reply"] = True
+        self.assertFalse((await self.dispatch(make_event())).is_stopped())
+        self.status = 200
+        self.assertTrue((await self.dispatch(make_event())).is_stopped())
+
+    async def test_zero_activity_stays_silent_even_if_request_assembly_fails(self):
+        self.config["reply_activity"] = 0
+        self.config["failure_default_reply"] = True
+        event = make_event()
+        event.set_extra("reply_gate_candidate", True)
+        req = ProviderRequest(prompt="text")
+        with patch.object(
+            type(req),
+            "assemble_context",
+            AsyncMock(side_effect=ValueError("unsupported_media")),
+        ):
+            await self.plugin.select_reply(event, req)
+        self.assertTrue(event.is_stopped())
+        self.assertFalse(event.get_extra("reply_gate_decision")["reply"])
+        self.assertEqual(self.requests, [])

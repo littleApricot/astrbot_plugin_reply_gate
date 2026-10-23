@@ -57,17 +57,17 @@ class VisionProtocolTests(unittest.IsolatedAsyncioTestCase):
             (req, current, config)
         )
         cases = [
-            ("submit_reply_decision", '{"should_reply":true}', True),
-            ("submit_reply_decision", '{"should_reply":false}', False),
-            ("meme_search", '{"should_reply":true}', "invalid_vision_decision"),
+            ("submit_reply_decision", '{"probability":0.6}', 0.6),
+            ("submit_reply_decision", '{"probability":0}', 0.0),
+            ("meme_search", '{"probability":0.6}', "invalid_vision_decision"),
             (
                 "submit_reply_decision",
-                '{"should_reply":"false"}',
+                '{"probability":true}',
                 "invalid_vision_schema",
             ),
             (
                 "submit_reply_decision",
-                '{"should_reply":true,"extra":1}',
+                '{"probability":0.6,"extra":1}',
                 "invalid_vision_schema",
             ),
         ]
@@ -103,8 +103,8 @@ class VisionProtocolTests(unittest.IsolatedAsyncioTestCase):
                 provider.client.chat.completions.create = create
                 with self.subTest(name=name, arguments=arguments):
                     call = judge_image(context, event, req, current, "rule", 5)
-                    if isinstance(expected, bool):
-                        self.assertIs(await call, expected)
+                    if isinstance(expected, float):
+                        self.assertEqual(await call, expected)
                     else:
                         with self.assertRaisesRegex(ValueError, expected):
                             await call
@@ -113,6 +113,12 @@ class VisionProtocolTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(
                         [t["function"]["name"] for t in payload["tools"]],
                         ["submit_reply_decision"],
+                    )
+                    self.assertEqual(
+                        payload["tools"][0]["function"]["parameters"]["properties"][
+                            "probability"
+                        ],
+                        {"type": "number", "minimum": 0, "maximum": 1},
                     )
                     self.assertEqual(
                         payload["tool_choice"],
@@ -146,24 +152,29 @@ class VisionProtocolTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await provider.client.close()
 
-    async def test_strict_boolean_json_with_optional_complete_fence(self):
+    async def test_strict_probability_json_with_optional_complete_fence(self):
         provider = SimpleNamespace(
             provider_config={"modalities": ["image"]}, text_chat=AsyncMock()
         )
         event, context = event_and_context(provider)
         cases = [
-            ('{"should_reply":true}', True),
-            ('{"should_reply":false}', False),
-            ('```json\n{"should_reply":false}\n```', False),
-            ('```json{"should_reply":true}```', True),
+            ('{"probability":0.6}', 0.6),
+            ('{"probability":0}', 0.0),
+            ('```json\n{"probability":0.1}\n```', 0.1),
+            ('```json{"probability":1}```', 1.0),
             ("````bad fence", "invalid_vision_json"),
             ("回复一下", "invalid_vision_json"),
             (
                 '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="meme_search"></｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>',
                 "invalid_vision_json",
             ),
-            ('{"should_reply":"false"}', "invalid_vision_schema"),
-            ('{"should_reply":1}', "invalid_vision_schema"),
+            ('{"probability":"0.6"}', "invalid_vision_schema"),
+            ('{"probability":true}', "invalid_vision_schema"),
+            ('{"probability":-0.1}', "invalid_vision_schema"),
+            ('{"probability":1.1}', "invalid_vision_schema"),
+            ('{"probability":NaN}', "invalid_vision_schema"),
+            ('{"probability":Infinity}', "invalid_vision_schema"),
+            ('{"probability":0.6,"extra":1}', "invalid_vision_schema"),
             ('{"reply":true}', "invalid_vision_schema"),
             ("[]", "invalid_vision_schema"),
             ("", "empty_vision_decision"),
@@ -176,8 +187,8 @@ class VisionProtocolTests(unittest.IsolatedAsyncioTestCase):
                 call = judge_image(
                     context, event, ProviderRequest(), image_message(), "rule", 1
                 )
-                if isinstance(expected, bool):
-                    self.assertIs(await call, expected)
+                if isinstance(expected, float):
+                    self.assertEqual(await call, expected)
                 else:
                     with self.assertRaisesRegex(ValueError, expected):
                         await call
@@ -205,7 +216,7 @@ class VisionProtocolTests(unittest.IsolatedAsyncioTestCase):
                     "finish_reason": "stop",
                     "message": {
                         "role": "assistant",
-                        "content": '{"should_reply":false}',
+                        "content": '{"probability":0.1}',
                     },
                 }
             ],
@@ -226,7 +237,7 @@ class VisionProtocolTests(unittest.IsolatedAsyncioTestCase):
             result = await judge_image(
                 context, event, req, current, "reply to greetings", 5
             )
-            self.assertIs(result, False)
+            self.assertEqual(result, 0.1)
             payload = create.await_args.kwargs
             self.assertEqual(
                 payload["extra_body"]["response_format"], {"type": "json_object"}

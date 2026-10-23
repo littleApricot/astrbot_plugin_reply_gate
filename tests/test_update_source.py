@@ -29,6 +29,7 @@ class UpdateSourceTests(unittest.IsolatedAsyncioTestCase):
         with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
             for name in [
                 "main.py",
+                "activity_gate.py",
                 "shared_context.py",
                 "vision_gate.py",
                 "__init__.py",
@@ -100,6 +101,10 @@ class UpdateSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((target / "old_file.py").exists())
         self.assertEqual(
             (target / "main.py").read_bytes(), (self.root / "main.py").read_bytes()
+        )
+        self.assertEqual(
+            (target / "activity_gate.py").read_bytes(),
+            (self.root / "activity_gate.py").read_bytes(),
         )
         self.assertEqual(
             yaml.safe_load((target / "metadata.yaml").read_text())["version"],

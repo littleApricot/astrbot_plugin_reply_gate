@@ -16,6 +16,7 @@ from astrbot.api.star import Context, Star
 from astrbot.core.agent.message import Message, dump_messages_with_checkpoints
 from openai import APIStatusError
 
+from .activity_gate import DEFAULT_ACTIVITY, ReplyAccumulator, validate_activity
 from .shared_context import (
     DEFAULT_INSTRUCTIONS,
     ENDPOINT,
@@ -40,6 +41,7 @@ class ReplyGate(Star):
                 config.save_config()
         self._http: aiohttp.ClientSession | None = None
         self._last_warning: dict[str, float] = {}
+        self._accumulator = ReplyAccumulator()
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=10_000)
     async def observe_message(self, event: AstrMessageEvent) -> None:
@@ -85,10 +87,18 @@ class ReplyGate(Star):
         """
         if not self.config.get("enabled", True):
             return
+        previous = event.get_extra("reply_gate_decision")
+        if previous is not None:
+            if not previous["reply"]:
+                event.stop_event()
+            return
+        conversation = getattr(req.conversation, "cid", "")
+        balance_key = (event.unified_msg_origin, str(conversation))
         if any(
             isinstance(part, At) and str(part.qq) == str(event.get_self_id())
             for part in event.get_messages()
         ):
+            self._accumulator.reset(balance_key)
             event.set_extra("reply_gate_decision", {"reply": True, "source": "mention"})
             self.logger.info("Reply gate: reply=True source=mention")
             return
@@ -99,15 +109,35 @@ class ReplyGate(Star):
         started = time.monotonic()
         decision_source = "request_preparation"
         timeout = None
+        activity = None
         try:
+            activity = validate_activity(
+                self.config.get("reply_activity", DEFAULT_ACTIVITY)
+            )
+            if activity in (0, 1):
+                self._accumulator.reset(balance_key)
+            if activity == 1:
+                event.set_extra(
+                    "reply_gate_decision",
+                    {"reply": True, "source": "activity", "activity": activity},
+                )
+                self.logger.info("Reply gate: reply=True source=activity activity=1")
+                return
             current = await req.assemble_context()
             instructions = str(self.config.get("decision_instructions") or "").strip()
             if not instructions:
                 instructions = DEFAULT_INSTRUCTIONS
-            if has_image(current):
+            if activity == 0:
+                should_reply = False
+                event.set_extra(
+                    "reply_gate_decision",
+                    {"reply": False, "source": "activity", "activity": activity},
+                )
+                self.logger.info("Reply gate: reply=False source=activity activity=0")
+            elif has_image(current):
                 decision_source = "reply_model_vision"
                 timeout = float(self.config.get("vision_timeout_seconds", 30))
-                should_reply = await judge_image(
+                probability = await judge_image(
                     self.context,
                     event,
                     req,
@@ -115,16 +145,34 @@ class ReplyGate(Star):
                     instructions,
                     timeout,
                 )
+                decision = self._accumulator.evaluate(
+                    balance_key, probability, activity
+                )
+                should_reply = decision.reply
                 event.set_extra(
                     "reply_gate_decision",
                     {
                         "reply": should_reply,
                         "source": "reply_model_vision",
+                        "probability": probability,
+                        "activity": activity,
+                        "accumulation_before": decision.before,
+                        "accumulation_change": decision.change,
+                        "accumulation_value": decision.accumulated,
+                        "accumulation_remaining": decision.remaining,
                     },
                 )
                 self.logger.info(
-                    "Reply gate: reply=%s source=reply_model_vision full_context=True",
+                    "Reply gate: reply=%s source=reply_model_vision full_context=True probability=%.4f activity=%.4f accumulation_before=%.4f accumulation_change=%s accumulation_value=%.4f accumulation_remaining=%.4f",
                     should_reply,
+                    probability,
+                    activity,
+                    decision.before,
+                    f"{decision.change:.4f}"
+                    if decision.change is not None
+                    else "endpoint",
+                    decision.accumulated,
+                    decision.remaining,
                 )
             else:
                 decision_source = MODEL
@@ -166,25 +214,37 @@ class ReplyGate(Star):
                         raise ValueError(f"decision_http_{response.status}")
                     body = await response.json(content_type=None)
                 probability = parse_probability(body)
-                threshold = float(self.config.get("reply_threshold", 0.5))
-                if not 0 <= threshold <= 1:
-                    raise ValueError("invalid_reply_threshold")
-                should_reply = probability >= threshold
+                decision = self._accumulator.evaluate(
+                    balance_key, probability, activity
+                )
+                should_reply = decision.reply
                 event.set_extra(
                     "reply_gate_decision",
                     {
                         "reply": should_reply,
                         "source": MODEL,
                         "probability": probability,
+                        "activity": activity,
+                        "accumulation_before": decision.before,
+                        "accumulation_change": decision.change,
+                        "accumulation_value": decision.accumulated,
+                        "accumulation_remaining": decision.remaining,
                         "dropped_messages": window.dropped_messages,
                         "dropped_group_records": window.dropped_group_records,
                         "shortened_current": window.shortened_current,
                     },
                 )
                 self.logger.info(
-                    "Reply gate: reply=%s probability=%.4f decision_dropped_messages=%d decision_dropped_group_records=%d decision_shortened_current=%s",
+                    "Reply gate: reply=%s probability=%.4f activity=%.4f accumulation_before=%.4f accumulation_change=%s accumulation_value=%.4f accumulation_remaining=%.4f decision_dropped_messages=%d decision_dropped_group_records=%d decision_shortened_current=%s",
                     should_reply,
                     probability,
+                    activity,
+                    decision.before,
+                    f"{decision.change:.4f}"
+                    if decision.change is not None
+                    else "endpoint",
+                    decision.accumulated,
+                    decision.remaining,
                     window.dropped_messages,
                     window.dropped_group_records,
                     window.shortened_current,
@@ -210,7 +270,7 @@ class ReplyGate(Star):
                     "unexpected_decision_model",
                     "invalid_decision_response",
                     "invalid_decision_probability",
-                    "invalid_reply_threshold",
+                    "invalid_reply_activity",
                     "reply_provider_missing",
                     "reply_provider_has_no_vision",
                     "invalid_vision_decision",
@@ -227,7 +287,9 @@ class ReplyGate(Star):
             )
             if isinstance(exc, APIStatusError):
                 reason = f"provider_http_{exc.status_code}"
-            fallback_reply = bool(self.config.get("failure_default_reply", True))
+            fallback_reply = activity != 0 and bool(
+                self.config.get("failure_default_reply", True)
+            )
             event.set_extra(
                 "reply_gate_decision",
                 {
@@ -253,6 +315,7 @@ class ReplyGate(Star):
                 )
                 self._last_warning[warning_key] = now
             if fallback_reply:
+                self._accumulator.reset(balance_key)
                 return
 
         event.stop_event()
