@@ -65,5 +65,15 @@
     "repo": "https://github.com/littleApricot/astrbot_plugin_lcm",
     "astrbot_version": ">=4.29.1,<4.30.0",
     "download_url": "https://github.com/littleApricot/astrbot_plugin_lcm/archive/refs/tags/v0.5.2.zip"
+  },
+  "littleApricot/astrbot_plugin_voice_reply": {
+    "author": "littleApricot",
+    "name": "astrbot_plugin_voice_reply",
+    "display_name": "自主语音回复",
+    "desc": "让模型自行选择发送语音，支持发送后沉默，官方历史上下文保留实际说出的原文。",
+    "version": "v0.1.0",
+    "repo": "https://github.com/littleApricot/astrbot_plugin_voice_reply",
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_voice_reply/archive/refs/tags/v0.1.0.zip",
+    "astrbot_version": ">=4.29.1,<4.30.0"
   }
 }
