@@ -12,7 +12,7 @@
 https://raw.githubusercontent.com/littleApricot/astrbot_plugin_reply_gate/main/plugins.json
 ```
 
-安装“回复判断”，后续通过已安装插件页检查更新。仓库为 [littleApricot/astrbot_plugin_reply_gate](https://github.com/littleApricot/astrbot_plugin_reply_gate)。共享源也提供记忆与记事本、群聊表情图库和 LCM。配套使用本次功能时，更新回复判断 v0.8.0、记忆 v0.4.3、图库 v0.4.2、LCM v0.3.0。
+安装“回复判断”，后续通过已安装插件页检查更新。仓库为 [littleApricot/astrbot_plugin_reply_gate](https://github.com/littleApricot/astrbot_plugin_reply_gate)。共享源也提供记忆与记事本、群聊表情图库和 LCM。配套使用本次功能时，更新回复判断 v0.8.1、记忆 v0.5.0、图库 v0.5.0、LCM v0.6.0。
 
 本地密钥、地址、预算、活跃度、合并时间和已有自定义提示词在更新时保留。只替换插件程序文件，运行数据留在 AstrBot 数据目录。
 
@@ -63,7 +63,7 @@ https://raw.githubusercontent.com/littleApricot/astrbot_plugin_reply_gate/main/p
 
 各批完成即发送，不按开始次序排队；QQ 分条发送可能交错。每次模型调用前读取最新共享历史，因此前一批已完成的回复、历史清理和已发布摘要会进入后续调用。已经发出的请求保留发送时的输入。
 
-本轮输入与尚未结束的工具过程作为本轮私有部分保留。完成后只合并本轮输出，保留并行更新；当轮专用记录按原生保存标记及图库历史处理规则清理。LCM v0.3.0 负责压缩后的有效历史及工具后调用刷新；未启用 LCM 时读取原生会话历史。插件只短暂锁定历史读写，不锁住整个生成过程。
+本轮输入与尚未结束的工具过程作为本轮私有部分保留。完成后只合并本轮输出，保留并行更新；当轮专用记录按原生保存标记及图库历史处理规则清理。LCM v0.6.0 负责压缩后的有效历史及工具后调用刷新；未启用 LCM 时读取原生会话历史。插件只短暂锁定历史读写，不锁住整个生成过程。
 
 ## 活跃度与积累
 
@@ -90,7 +90,7 @@ https://raw.githubusercontent.com/littleApricot/astrbot_plugin_reply_gate/main/p
 
 ## 日志和验证
 
-日志记录批大小、等待时间、概率、积累变化、剩余值、是否回复和裁剪数量。失败显示 `Reply gate failed open/closed`、错误类型与耗时，同类警告最多每分钟一次；不记录密钥、完整请求或聊天原文。
+日志记录批大小、等待时间、概率、积累变化、剩余值、是否回复和裁剪数量。失败以中文显示回退回复或沉默、错误类型与耗时，同类警告最多每分钟一次；不记录密钥、完整请求或聊天原文。
 
 在 AstrBot Python 环境下运行：
 

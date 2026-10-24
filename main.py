@@ -105,9 +105,7 @@ class ReplyGate(Star):
         try:
             idle, maximum = merge_delays(self.config)
         except ValueError:
-            self.logger.warning(
-                "Reply gate: invalid_merge_delay; using 1 and 3 seconds"
-            )
+            self.logger.warning("回复判断：合并等待时间配置无效，改用 1 至 3 秒")
             idle, maximum = 1.0, 3.0
         member = await self._batcher.join(
             event,
@@ -127,7 +125,7 @@ class ReplyGate(Star):
             event.set_extra("reply_gate_batch", member.batch)
             self._parallel.enter(event)
             self.logger.info(
-                "Reply gate batch: messages=%d wait_seconds=%.3f",
+                "回复判断合并：消息数=%d，等待秒数=%.3f",
                 len(member.batch.members),
                 asyncio.get_running_loop().time() - member.batch.first,
             )
@@ -152,9 +150,7 @@ class ReplyGate(Star):
             raise
         except Exception as exc:
             # Do not produce a partial reply that silently omits batch members.
-            self.logger.error(
-                "Reply gate batch preparation failed: %s", type(exc).__name__
-            )
+            self.logger.error("待回复消息合并失败：%s", type(exc).__name__)
             event.stop_event()
 
     @filter.on_llm_request(priority=maxsize)
@@ -177,9 +173,7 @@ class ReplyGate(Star):
             event.stop_event()
             raise
         except Exception as exc:
-            self.logger.error(
-                "Reply gate parallel history preparation failed: %s", type(exc).__name__
-            )
+            self.logger.error("回复判断并行历史准备失败：%s", type(exc).__name__)
             event.stop_event()
             return
         event.set_extra("reply_gate_batch_expanded", True)
@@ -213,7 +207,7 @@ class ReplyGate(Star):
         ):
             self._accumulator.reset(balance_key)
             event.set_extra("reply_gate_decision", {"reply": True, "source": "mention"})
-            self.logger.info("Reply gate: reply=True source=mention")
+            self.logger.info("回复判断：回复=True，来源=@提及")
             return
         if not event.get_extra("reply_gate_candidate", False):
             return
@@ -235,7 +229,7 @@ class ReplyGate(Star):
                     "reply_gate_decision",
                     {"reply": True, "source": "activity", "activity": activity},
                 )
-                self.logger.info("Reply gate: reply=True source=activity activity=1")
+                self.logger.info("回复判断：回复=True，来源=活跃度，活跃度=1")
                 return
             current = await req.assemble_context()
             full_current = copy.deepcopy(current)
@@ -248,7 +242,7 @@ class ReplyGate(Star):
                     "reply_gate_decision",
                     {"reply": False, "source": "activity", "activity": activity},
                 )
-                self.logger.info("Reply gate: reply=False source=activity activity=0")
+                self.logger.info("回复判断：回复=False，来源=活跃度，活跃度=0")
             else:
                 decision_source = MODEL
                 timeout = float(self.config.get("timeout_seconds", 30))
@@ -311,7 +305,7 @@ class ReplyGate(Star):
                     },
                 )
                 self.logger.info(
-                    "Reply gate: reply=%s probability=%.4f activity=%.4f accumulation_before=%.4f accumulation_change=%s accumulation_value=%.4f accumulation_remaining=%.4f decision_dropped_messages=%d decision_dropped_group_records=%d decision_shortened_current=%s",
+                    "回复判断：回复=%s，概率=%.4f，活跃度=%.4f，积累前值=%.4f，积累变化=%s，积累结果=%.4f，积累剩余=%.4f，判断移除消息数=%d，判断移除群记录数=%d，当前消息已截短=%s",
                     should_reply,
                     probability,
                     activity,
@@ -373,8 +367,8 @@ class ReplyGate(Star):
             warning_key = f"{decision_source}:{reason}:{fallback_reply}"
             if now - self._last_warning.get(warning_key, -60) >= 60:
                 self.logger.warning(
-                    "Reply gate failed %s: reason=%s source=%s elapsed_seconds=%.3f timeout_seconds=%s fallback_reply=%s.",
-                    "open" if fallback_reply else "closed",
+                    "回复判断失败，%s：原因=%s，来源=%s，耗时秒数=%.3f，超时秒数=%s，回退回复=%s。",
+                    "回退为回复" if fallback_reply else "回退为沉默",
                     reason,
                     decision_source,
                     now - started,
@@ -409,7 +403,7 @@ class ReplyGate(Star):
                 )
             except Exception as exc:
                 self.logger.error(
-                    "Reply gate could not retain an unsent turn: %s", type(exc).__name__
+                    "回复判断未能保存本轮未回复消息：%s", type(exc).__name__
                 )
 
     async def terminate(self) -> None:
