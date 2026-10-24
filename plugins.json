@@ -30,10 +30,10 @@
     "author": "littleApricot",
     "name": "astrbot_plugin_self_prompt",
     "display_name": "记忆与记事本",
-    "desc": "人设与回复偏好由用户维护，其他记忆按消息数整理，昵称与记事本可由机器人维护。",
-    "version": "v0.6.0",
+    "desc": "人设与回复偏好由用户维护，机器人可主动维护昵称、自我认知和记事本，连续未修改时临时提醒。",
+    "version": "v0.7.0",
     "repo": "https://github.com/littleApricot/astrbot_plugin_self_prompt",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_self_prompt/archive/refs/tags/v0.6.0.zip",
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_self_prompt/archive/refs/tags/v0.7.0.zip",
     "astrbot_version": ">=4.29.1,<4.30.0"
   },
   "littleApricot/astrbot_plugin_silence": {
