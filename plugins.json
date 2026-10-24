@@ -31,9 +31,9 @@
     "name": "astrbot_plugin_self_prompt",
     "display_name": "记忆与记事本",
     "desc": "常驻记忆按消息数整理并保留原文来源，记事本目录常驻、正文按需读取。",
-    "version": "v0.5.1",
+    "version": "v0.5.2",
     "repo": "https://github.com/littleApricot/astrbot_plugin_self_prompt",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_self_prompt/archive/refs/tags/v0.5.1.zip",
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_self_prompt/archive/refs/tags/v0.5.2.zip",
     "astrbot_version": ">=4.29.1,<4.30.0"
   },
   "littleApricot/astrbot_plugin_silence": {
