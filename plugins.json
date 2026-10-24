@@ -29,11 +29,11 @@
   "littleApricot/astrbot_plugin_self_prompt": {
     "author": "littleApricot",
     "name": "astrbot_plugin_self_prompt",
-    "display_name": "自维护提示词",
-    "desc": "固定设定由你维护，机器人只编辑可维护区，每 100 条消息自动整理记忆。",
-    "version": "v0.3.0",
+    "display_name": "记忆与记事本",
+    "desc": "常驻记忆按消息数整理并保留原文来源，记事本目录常驻、正文按需读取。",
+    "version": "v0.4.0",
     "repo": "https://github.com/littleApricot/astrbot_plugin_self_prompt",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_self_prompt/archive/refs/tags/v0.3.0.zip",
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_self_prompt/archive/refs/tags/v0.4.0.zip",
     "astrbot_version": ">=4.29.1,<4.30.0"
   },
   "littleApricot/astrbot_plugin_silence": {
