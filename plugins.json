@@ -36,16 +36,6 @@
     "download_url": "https://github.com/littleApricot/astrbot_plugin_self_prompt/archive/refs/tags/v0.3.0.zip",
     "astrbot_version": ">=4.29.1,<4.30.0"
   },
-  "littleApricot/astrbot_plugin_self_balance": {
-    "author": "littleApricot",
-    "name": "astrbot_plugin_self_balance",
-    "display_name": "自查余额",
-    "desc": "让机器人通过工具查询当前 DeepSeek 账户的真实余额，复用已有模型配置。",
-    "version": "v0.1.0",
-    "repo": "https://github.com/littleApricot/astrbot_plugin_self_balance",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_self_balance/archive/refs/tags/v0.1.0.zip",
-    "astrbot_version": ">=4.29.1,<4.30.0"
-  },
   "littleApricot/astrbot_plugin_silence": {
     "author": "littleApricot",
     "name": "astrbot_plugin_silence",
@@ -60,11 +50,11 @@
     "author": "littleApricot",
     "name": "astrbot_plugin_usage_insight",
     "display_name": "用量与费用明细",
-    "desc": "查看缓存命中、输入输出、费用估算、按人归属和各类模型调用明细。",
-    "version": "v0.2.0",
+    "desc": "查看用量、缓存、费用估算和按人明细，支持本机 Key 统计及机器人自查官方账号余额。",
+    "version": "v0.3.0",
     "repo": "https://github.com/littleApricot/astrbot_plugin_usage_insight",
     "astrbot_version": ">=4.29.1,<4.30.0",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_usage_insight/archive/refs/tags/v0.2.0.zip"
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_usage_insight/archive/refs/tags/v0.3.0.zip"
   },
   "littleApricot/astrbot_plugin_lcm": {
     "author": "littleApricot",
