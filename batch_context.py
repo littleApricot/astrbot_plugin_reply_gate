@@ -27,7 +27,7 @@ def sender_header(event, timezone: str) -> str:
     timestamp = datetime.datetime.fromtimestamp(event.message_obj.timestamp, tz)
     name = event.get_sender_name() or event.get_sender_id()
     mention = " @机器人" if is_mention(event) else ""
-    return f"[{name}({event.get_sender_id()})/{timestamp.isoformat(timespec='seconds')}{mention}] "
+    return f"[{name}({event.get_sender_id()})/{timestamp.strftime('%Y-%m-%d %H:%M:%S')}{mention}] "
 
 
 def is_mention(event) -> bool:

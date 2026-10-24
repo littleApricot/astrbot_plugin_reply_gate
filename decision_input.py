@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from astrbot.core.agent.message import bind_checkpoint_messages
 
@@ -85,4 +87,7 @@ async def build_input(context, event, req):
         current["content"] = [{"type": "text", "text": current["content"]}]
     current["sender_id"] = getattr(event, "get_sender_id", lambda: "")()
     current["sender_name"] = getattr(event, "get_sender_name", lambda: "")()
+    config = context.get_config(umo=event.unified_msg_origin)
+    zone = ZoneInfo(config.get("timezone", "Asia/Shanghai") or "Asia/Shanghai")
+    current["current_time"] = datetime.now(zone).strftime("%Y-%m-%d %H:%M:%S")
     return history, current
