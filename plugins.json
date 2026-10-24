@@ -60,10 +60,10 @@
     "author": "littleApricot",
     "name": "astrbot_plugin_lcm",
     "display_name": "LCM 上下文与历史",
-    "desc": "完整历史存档、整轮分层压缩、后台上下文切换、历史检索与逐级来源查看器。",
-    "version": "v0.3.0",
+    "desc": "完整历史存档、最近图片窗口、整轮分层压缩、历史检索与原图查回。",
+    "version": "v0.4.0",
     "repo": "https://github.com/littleApricot/astrbot_plugin_lcm",
     "astrbot_version": ">=4.29.1,<4.30.0",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_lcm/archive/refs/tags/v0.3.0.zip"
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_lcm/archive/refs/tags/v0.4.0.zip"
   }
 }
