@@ -21,9 +21,9 @@
     "name": "astrbot_plugin_meme_library",
     "display_name": "群聊表情图库",
     "desc": "自动收集群聊图片，维护名称和简短描述，支持看图选择、用法纠正、停用及原图路径读取。",
-    "version": "v0.5.1",
+    "version": "v0.6.0",
     "repo": "https://github.com/littleApricot/astrbot_plugin_meme_library",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_meme_library/archive/refs/tags/v0.5.1.zip",
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_meme_library/archive/refs/tags/v0.6.0.zip",
     "astrbot_version": ">=4.29.1,<4.30.0"
   },
   "littleApricot/astrbot_plugin_self_prompt": {
