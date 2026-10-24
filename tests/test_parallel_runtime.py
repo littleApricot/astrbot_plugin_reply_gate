@@ -5,6 +5,7 @@ import copy
 import json
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from astrbot.core.agent.message import Message
 from astrbot.core.pipeline.process_stage.method.agent_sub_stages import internal
@@ -46,6 +47,15 @@ class ParallelRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.runtime.close()
         self.assertIs(internal.session_lock_manager, self.original_lock)
+
+    def register_inputs(self, event, messages):
+        runner = SimpleNamespace(
+            run_context=SimpleNamespace(
+                context=SimpleNamespace(event=event), messages=messages
+            )
+        )
+        with patch.object(self.runtime.bridge, "register"):
+            internal.register_active_runner(event.unified_msg_origin, runner)
 
     async def test_native_locks_allow_many_batches_but_other_events_still_serialize(
         self,
@@ -95,8 +105,9 @@ class ParallelRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 ready[i].set()
                 await release[i].wait()
                 messages = [Message.model_validate(m) for m in req.contexts]
+                messages.append(Message.model_validate(await req.assemble_context()))
+                self.register_inputs(event, messages)
                 messages += [
-                    Message.model_validate(await req.assemble_context()),
                     Message(
                         role="assistant",
                         content="checking",
@@ -189,8 +200,9 @@ class ParallelRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 Message(role="system", content="PERSONA"),
                 Message(role="user", content="native summary of older context"),
                 Message.model_validate(await req.assemble_context()),
-                Message(role="assistant", content="reply"),
             ]
+            self.register_inputs(event, messages)
+            messages.append(Message(role="assistant", content="reply"))
             await internal.InternalAgentSubStage._save_to_history(
                 SimpleNamespace(),
                 event,
@@ -206,3 +218,284 @@ class ParallelRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.saved[-1]["content"], "reply")
         finally:
             event.cleanup_temporary_local_files()
+
+    async def test_tool_images_survive_concurrent_merges_and_repeated_saves(self):
+        initial = copy.deepcopy(self.saved)
+        first, later = make_event(), make_event()
+        self.runtime.enter(first)
+        try:
+            req = ProviderRequest(
+                prompt="first batch",
+                contexts=copy.deepcopy(initial),
+                conversation=SimpleNamespace(cid="conv", token_usage=0),
+            )
+            await self.runtime.prepare(first, req, len(initial))
+            messages = [Message.model_validate(m) for m in req.contexts]
+            messages.append(Message.model_validate(await req.assemble_context()))
+            self.register_inputs(first, messages)
+            self.runtime.enter(later)
+            req_later = ProviderRequest(
+                prompt="later batch",
+                contexts=copy.deepcopy(initial),
+                conversation=SimpleNamespace(cid="conv", token_usage=0),
+            )
+            await self.runtime.prepare(later, req_later, len(initial))
+            admitted = copy.deepcopy(self.saved)
+            for index in range(2):
+                messages.extend(
+                    [
+                        Message(
+                            role="assistant",
+                            tool_calls=[
+                                {
+                                    "id": f"view-{index}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "meme_view",
+                                        "arguments": "{}",
+                                    },
+                                }
+                            ],
+                        ),
+                        Message(
+                            role="tool",
+                            tool_call_id=f"view-{index}",
+                            content=f"metadata-{index}",
+                        ),
+                        Message(
+                            role="user",
+                            content=[
+                                {
+                                    "type": "text",
+                                    "text": f"[Image from tool meme_view {index}]",
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/png;base64,AA{index}="
+                                    },
+                                },
+                            ],
+                        ),
+                        Message(role="assistant", content=f"reviewed-{index}"),
+                    ]
+                )
+                for _ in range(2):
+                    await internal.InternalAgentSubStage._save_to_history(
+                        SimpleNamespace(),
+                        first,
+                        req,
+                        LLMResponse(
+                            role="assistant", completion_text=f"reviewed-{index}"
+                        ),
+                        messages,
+                        None,
+                    )
+                expected_outputs = [
+                    m.model_dump() for m in messages[-4 * (index + 1) :]
+                ]
+                self.assertEqual(self.saved, admitted + expected_outputs)
+            self.assertEqual(self.saved[:1], initial)
+            third = make_event()
+            self.runtime.enter(third)
+            try:
+                follow_up = ProviderRequest(
+                    prompt="what did that picture mean?",
+                    contexts=copy.deepcopy(initial),
+                    conversation=SimpleNamespace(cid="conv", token_usage=0),
+                )
+                await self.runtime.prepare(third, follow_up, len(initial))
+                self.assertEqual(follow_up.contexts, self.saved[:-1])
+                self.assertIn(
+                    "data:image/png;base64,AA0=", json.dumps(follow_up.contexts)
+                )
+                self.assertIn(
+                    "data:image/png;base64,AA1=", json.dumps(follow_up.contexts)
+                )
+            finally:
+                third.cleanup_temporary_local_files()
+        finally:
+            later.cleanup_temporary_local_files()
+            first.cleanup_temporary_local_files()
+
+    async def test_compacted_prefix_and_temporary_hints_keep_the_real_input_boundary(
+        self,
+    ):
+        from astrbot.core.agent.message import TextPart
+
+        first, later = make_event(), make_event()
+        initial = copy.deepcopy(self.saved)
+        self.runtime.enter(first)
+        try:
+            req = ProviderRequest(
+                prompt="first batch",
+                contexts=copy.deepcopy(initial),
+                conversation=SimpleNamespace(cid="conv", token_usage=0),
+            )
+            await self.runtime.prepare(first, req, len(initial))
+            current = Message.model_validate(await req.assemble_context())
+            self.register_inputs(first, [current])
+            if isinstance(current.content, str):
+                current.content = [TextPart(text=current.content)]
+            current.content.append(TextPart(text="temporary hint").mark_as_temp())
+            self.runtime.enter(later)
+            req_later = ProviderRequest(
+                prompt="later batch",
+                contexts=copy.deepcopy(initial),
+                conversation=SimpleNamespace(cid="conv", token_usage=0),
+            )
+            await self.runtime.prepare(later, req_later, len(initial))
+            admitted = copy.deepcopy(self.saved)
+            hidden = Message(role="user", content="internal temporary message")
+            hidden._no_save = True
+            messages = [
+                Message(role="system", content="PERSONA"),
+                Message(role="user", content="native summary"),
+                current,
+                hidden,
+                Message(role="user", content="[Image from tool meme_view]"),
+                Message(role="assistant", content="reply"),
+            ]
+            first.set_extra("llm_checkpoint_id", "offline-checkpoint")
+            for _ in range(2):
+                await internal.InternalAgentSubStage._save_to_history(
+                    SimpleNamespace(),
+                    first,
+                    req,
+                    LLMResponse(role="assistant", completion_text="reply"),
+                    messages,
+                    None,
+                )
+            self.assertEqual(self.saved[: len(admitted)], admitted)
+            self.assertEqual(
+                [m["role"] for m in self.saved[len(admitted) :]],
+                ["user", "assistant", "_checkpoint"],
+            )
+            self.assertNotIn("temporary", json.dumps(self.saved))
+            self.assertNotIn("native summary", json.dumps(self.saved))
+        finally:
+            later.cleanup_temporary_local_files()
+            first.cleanup_temporary_local_files()
+
+    async def test_native_runner_tool_image_is_saved_and_visible_to_the_next_batch(
+        self,
+    ):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from astrbot.core.agent.hooks import BaseAgentRunHooks
+        from astrbot.core.agent.run_context import ContextWrapper
+        from astrbot.core.agent.runners.tool_loop_agent_runner import (
+            ToolLoopAgentRunner,
+        )
+        from astrbot.core.agent.tool import FunctionTool, ToolSet
+        from astrbot.core.provider.entities import ProviderMeta
+        from astrbot.core.provider.provider import Provider
+        from mcp.types import CallToolResult, ImageContent, TextContent
+
+        image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jewAAAABJRU5ErkJggg=="
+        first, later = make_event(), make_event()
+        initial = copy.deepcopy(self.saved)
+        self.runtime.enter(first)
+        try:
+            req = ProviderRequest(
+                prompt="first batch",
+                system_prompt="PERSONA",
+                contexts=copy.deepcopy(initial),
+                conversation=SimpleNamespace(cid="conv", token_usage=0),
+                func_tool=ToolSet(
+                    [
+                        FunctionTool(
+                            name="meme_view", description="View a meme", parameters={}
+                        )
+                    ]
+                ),
+            )
+            await self.runtime.prepare(first, req, len(initial))
+            provider = MagicMock(spec=Provider)
+            provider.provider_config = {
+                "modalities": ["text", "image"],
+                "max_context_tokens": 128000,
+            }
+            provider.meta.return_value = ProviderMeta("test", "test", "test", None)
+            provider.get_model.return_value = "test"
+            provider.text_chat = AsyncMock(
+                side_effect=[
+                    LLMResponse(
+                        role="assistant",
+                        tools_call_name=["meme_view"],
+                        tools_call_args=[{}],
+                        tools_call_ids=["native-view"],
+                    ),
+                    LLMResponse(role="assistant", completion_text="reviewed image"),
+                ]
+            )
+
+            async def execute(**kwargs):
+                yield CallToolResult(
+                    content=[
+                        TextContent(type="text", text="meme metadata"),
+                        ImageContent(type="image", data=image, mimeType="image/png"),
+                    ]
+                )
+
+            runner = ToolLoopAgentRunner()
+            await runner.reset(
+                provider=provider,
+                request=req,
+                run_context=ContextWrapper(context=SimpleNamespace(event=first)),
+                tool_executor=SimpleNamespace(execute=execute),
+                agent_hooks=BaseAgentRunHooks(),
+            )
+            self.register_inputs(first, runner.run_context.messages)
+            async for _ in runner.step():
+                pass
+            self.assertEqual(runner.run_context.messages[-1].role, "user")
+            self.assertIn(
+                "image_url", json.dumps(runner.run_context.messages[-1].model_dump())
+            )
+            self.runtime.enter(later)
+            req_later = ProviderRequest(
+                prompt="later batch",
+                contexts=copy.deepcopy(initial),
+                conversation=SimpleNamespace(cid="conv", token_usage=0),
+            )
+            await self.runtime.prepare(later, req_later, len(initial))
+            admitted = copy.deepcopy(self.saved)
+            async for _ in runner.step():
+                pass
+            for _ in range(2):
+                await internal.InternalAgentSubStage._save_to_history(
+                    SimpleNamespace(),
+                    first,
+                    req,
+                    runner.get_final_llm_resp(),
+                    runner.run_context.messages,
+                    runner.stats,
+                )
+            outputs = self.saved[len(admitted) :]
+            self.assertEqual(
+                [m["role"] for m in outputs], ["assistant", "tool", "user", "assistant"]
+            )
+            self.assertEqual(outputs[1]["tool_call_id"], "native-view")
+            self.assertIn("data:image/png;base64," + image, json.dumps(outputs[2]))
+            self.assertIn(
+                "image_url", json.dumps(provider.text_chat.call_args.kwargs["contexts"])
+            )
+            third = make_event()
+            self.runtime.enter(third)
+            try:
+                follow_up = ProviderRequest(
+                    prompt="what did that picture mean?",
+                    contexts=copy.deepcopy(initial),
+                    conversation=SimpleNamespace(cid="conv", token_usage=0),
+                )
+                await self.runtime.prepare(third, follow_up, len(initial))
+                self.assertIn(
+                    "data:image/png;base64," + image, json.dumps(follow_up.contexts)
+                )
+                self.assertIn("native-view", json.dumps(follow_up.contexts))
+            finally:
+                third.cleanup_temporary_local_files()
+        finally:
+            later.cleanup_temporary_local_files()
+            first.cleanup_temporary_local_files()

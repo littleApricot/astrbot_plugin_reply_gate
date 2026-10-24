@@ -1,7 +1,7 @@
 name: astrbot_plugin_reply_gate
 display_name: 回复判断
 desc: 连续消息按批并行判断和回复，等待时间与活跃度可配置，@ 稳定回复。
-version: v0.7.0
+version: v0.7.1
 author: littleApricot
 repo: https://github.com/littleApricot/astrbot_plugin_reply_gate
 astrbot_version: ">=4.29.1,<4.30.0"

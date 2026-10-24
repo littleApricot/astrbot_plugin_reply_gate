@@ -22,6 +22,7 @@ class ParallelRun:
     key: str = field(default_factory=lambda: uuid4().hex)
     cid: str = ""
     admitted: list[dict] | None = None
+    input_message: Message | None = None
     saved_outputs: list[dict] | None = None
 
 
@@ -65,6 +66,20 @@ class _Bridge:
             return bridge.capture(event)
 
         def register(origin, runner):
+            event = getattr(getattr(runner.run_context, "context", None), "event", None)
+            if event is not None:
+                run = event.get_extra("reply_gate_parallel")
+                if run is not None and run.input_message is None:
+                    # Capture before generation: tools may later append their
+                    # own user messages containing images or other results.
+                    run.input_message = next(
+                        (
+                            m
+                            for m in reversed(runner.run_context.messages)
+                            if m.role == "user"
+                        ),
+                        None,
+                    )
             return bridge.register(runner_key(origin, runner), runner)
 
         def unregister(origin, runner):
@@ -80,15 +95,31 @@ class _Bridge:
                 )
 
             async def update(origin, cid, *, history, **kwargs):
-                # Native follow-up capture is disabled for these runs: the last
-                # user message anchors this batch's assistant/tool output only.
-                last_user = max(
-                    (i for i, msg in enumerate(history) if msg.get("role") == "user"),
-                    default=-1,
+                current = next(
+                    (
+                        i
+                        for i, message in enumerate(messages)
+                        if message is run.input_message
+                    ),
+                    None,
                 )
-                if last_user < 0:
+                if current is None:
                     raise ValueError("parallel_history_missing_current_user")
-                await run.controller.finish(run, history, history[last_user + 1 :])
+                # Match the native serializer's prefix, including temporary
+                # filtering and checkpoints, without inspecting generated roles.
+                prefix = []
+                skipped_system = False
+                for message in messages[: current + 1]:
+                    if message.role == "system" and not skipped_system:
+                        skipped_system = True
+                        continue
+                    if message.role in ("assistant", "user") and message._no_save:
+                        continue
+                    prefix.append(message)
+                saved_prefix = dump_messages_with_checkpoints(prefix)
+                if history[: len(saved_prefix)] != saved_prefix:
+                    raise ValueError("parallel_history_input_prefix_changed")
+                await run.controller.finish(run, history, history[len(saved_prefix) :])
 
             proxy = SimpleNamespace(
                 conv_manager=SimpleNamespace(update_conversation=update)

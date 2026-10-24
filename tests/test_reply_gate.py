@@ -20,6 +20,9 @@ from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunne
 from astrbot.core.config.default import DEFAULT_CONFIG
 from astrbot.core.pipeline.context import PipelineContext
 from astrbot.core.pipeline.context_utils import call_event_hook
+from astrbot.core.pipeline.process_stage.method.agent_sub_stages import (
+    internal as native_internal,
+)
 from astrbot.core.pipeline.process_stage.method.agent_sub_stages.internal import (
     InternalAgentSubStage,
 )
@@ -409,15 +412,19 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             tool_executor=MagicMock(),
             agent_hooks=BaseAgentRunHooks(),
         )
-        async for result in runner.step():
-            yield result
-        await self.history_stage._save_to_history(
-            event,
-            req,
-            runner.get_final_llm_resp(),
-            runner.run_context.messages,
-            runner.stats,
-        )
+        native_internal.register_active_runner(event.unified_msg_origin, runner)
+        try:
+            async for result in runner.step():
+                yield result
+            await self.history_stage._save_to_history(
+                event,
+                req,
+                runner.get_final_llm_resp(),
+                runner.run_context.messages,
+                runner.stats,
+            )
+        finally:
+            native_internal.unregister_active_runner(event.unified_msg_origin, runner)
         event.call_llm = True
 
     async def dispatch(self, event):
