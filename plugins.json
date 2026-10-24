@@ -50,11 +50,11 @@
     "author": "littleApricot",
     "name": "astrbot_plugin_usage_insight",
     "display_name": "用量与费用明细",
-    "desc": "查看用量、缓存、费用估算和按人明细，支持本机 Key 统计、官方明细导入核对及机器人自查余额。",
-    "version": "v0.4.0",
+    "desc": "查看本 bot 的用量、缓存、费用估算和按人明细，复用现有 Key 查询账号余额，明确其他应用消耗的可见范围。",
+    "version": "v0.5.0",
     "repo": "https://github.com/littleApricot/astrbot_plugin_usage_insight",
     "astrbot_version": ">=4.29.1,<4.30.0",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_usage_insight/archive/refs/tags/v0.4.0.zip"
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_usage_insight/archive/refs/tags/v0.5.0.zip"
   },
   "littleApricot/astrbot_plugin_lcm": {
     "author": "littleApricot",
