@@ -2,7 +2,7 @@
   "$meta": {
     "schema_version": 1,
     "name": "littleApricot AstrBot Plugins",
-    "version": "v0.7.1",
+    "version": "v0.8.0",
     "description": "littleApricot AstrBot 插件发布源",
     "repository": "https://github.com/littleApricot/astrbot_plugin_reply_gate"
   },
@@ -10,10 +10,10 @@
     "author": "littleApricot",
     "name": "astrbot_plugin_reply_gate",
     "display_name": "回复判断",
-    "desc": "连续消息按批并行判断和回复，等待时间与活跃度可配置，@ 稳定回复。",
-    "version": "v0.7.1",
+    "desc": "统一文字判断、完整记忆优先、@ 立即接管尚未开始判断的消息及最新共享历史。",
+    "version": "v0.8.0",
     "repo": "https://github.com/littleApricot/astrbot_plugin_reply_gate",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_reply_gate/archive/refs/tags/v0.7.1.zip",
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_reply_gate/archive/refs/tags/v0.8.0.zip",
     "astrbot_version": ">=4.29.1,<4.30.0"
   },
   "littleApricot/astrbot_plugin_meme_library": {
@@ -21,9 +21,9 @@
     "name": "astrbot_plugin_meme_library",
     "display_name": "群聊表情图库",
     "desc": "自动收集群聊图片，维护名称和简短描述，支持看图选择、用法纠正、停用及原图路径读取。",
-    "version": "v0.4.1",
+    "version": "v0.4.2",
     "repo": "https://github.com/littleApricot/astrbot_plugin_meme_library",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_meme_library/archive/refs/tags/v0.4.1.zip",
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_meme_library/archive/refs/tags/v0.4.2.zip",
     "astrbot_version": ">=4.29.1,<4.30.0"
   },
   "littleApricot/astrbot_plugin_self_prompt": {
@@ -31,9 +31,9 @@
     "name": "astrbot_plugin_self_prompt",
     "display_name": "记忆与记事本",
     "desc": "常驻记忆按消息数整理并保留原文来源，记事本目录常驻、正文按需读取。",
-    "version": "v0.4.2",
+    "version": "v0.4.3",
     "repo": "https://github.com/littleApricot/astrbot_plugin_self_prompt",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_self_prompt/archive/refs/tags/v0.4.2.zip",
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_self_prompt/archive/refs/tags/v0.4.3.zip",
     "astrbot_version": ">=4.29.1,<4.30.0"
   },
   "littleApricot/astrbot_plugin_silence": {
@@ -61,9 +61,9 @@
     "name": "astrbot_plugin_lcm",
     "display_name": "LCM 上下文与历史",
     "desc": "完整历史存档、整轮分层压缩、后台上下文切换、历史检索与逐级来源查看器。",
-    "version": "v0.2.0",
+    "version": "v0.3.0",
     "repo": "https://github.com/littleApricot/astrbot_plugin_lcm",
     "astrbot_version": ">=4.29.1,<4.30.0",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_lcm/archive/refs/tags/v0.2.0.zip"
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_lcm/archive/refs/tags/v0.3.0.zip"
   }
 }
