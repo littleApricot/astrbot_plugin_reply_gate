@@ -61,10 +61,10 @@
     "name": "astrbot_plugin_usage_insight",
     "display_name": "用量与费用明细",
     "desc": "查看缓存命中、输入输出、费用估算、按人归属和各类模型调用明细。",
-    "version": "v0.1.0",
+    "version": "v0.2.0",
     "repo": "https://github.com/littleApricot/astrbot_plugin_usage_insight",
     "astrbot_version": ">=4.29.1,<4.30.0",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_usage_insight/archive/refs/tags/v0.1.0.zip"
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_usage_insight/archive/refs/tags/v0.2.0.zip"
   },
   "littleApricot/astrbot_plugin_lcm": {
     "author": "littleApricot",
