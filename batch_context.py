@@ -17,7 +17,6 @@ from astrbot.core.utils.quoted_message_parser import extract_quoted_message_text
 
 from .message_batch import MessageBatch
 from .shared_context import GROUP_BEGIN, GROUP_END, RECORD_START
-from .vision_gate import has_image
 
 
 def sender_header(event, timezone: str) -> str:
@@ -75,7 +74,6 @@ async def prepare_past_messages(context, batch: MessageBatch) -> None:
                     )
             message = await raw.assemble_context()
             batch.past_messages.append(message)
-            batch.image_in_past |= has_image(message)
         finally:
             event.set_extra("provider_request", previous)
 

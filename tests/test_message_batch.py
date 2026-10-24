@@ -134,3 +134,36 @@ class BatchingTests(unittest.IsolatedAsyncioTestCase):
             for key in ["merge_idle_seconds", "merge_max_wait_seconds"]:
                 with self.subTest(value=value, key=key), self.assertRaises(ValueError):
                     merge_delays({key: value})
+
+    async def test_mention_immediately_claims_collecting_and_ready_unjudged_messages(
+        self,
+    ):
+        ready_event, waiting_event, at_event = event(), event(), event()
+        ready = await self.batcher.join(ready_event, 0, 0)
+        pending = asyncio.create_task(self.batcher.join(waiting_event, 30, 60))
+        await asyncio.sleep(0)
+        at = await asyncio.wait_for(
+            self.batcher.join(at_event, 30, 60, immediate=True), 0.2
+        )
+        waiting = await asyncio.wait_for(pending, 0.2)
+        self.assertIs(ready.batch, at.batch)
+        self.assertIs(waiting.batch, at.batch)
+        self.assertEqual(len(at.batch.members), 3)
+        self.assertFalse(self.batcher.begin(ready))
+        self.assertTrue(self.batcher.begin(at))
+        for e in [ready_event, waiting_event, at_event]:
+            e.cleanup_temporary_local_files()
+            self.assertEqual(e.cleanups, ["cleaned"] if e is at_event else [])
+        self.assertEqual(ready_event.cleanups, ["cleaned"])
+        self.assertEqual(waiting_event.cleanups, ["cleaned"])
+
+    async def test_mention_does_not_take_messages_that_started_judgment(self):
+        previous, at_event = event(), event()
+        old = await self.batcher.join(previous, 0, 0)
+        self.assertTrue(self.batcher.begin(old))
+        at = await self.batcher.join(at_event, 60, 60, immediate=True)
+        self.assertIsNot(old.batch, at.batch)
+        self.assertEqual(at.batch.members, [at])
+        at_event.cleanup_temporary_local_files()
+        self.assertFalse(old.batch.done.is_set())
+        previous.cleanup_temporary_local_files()

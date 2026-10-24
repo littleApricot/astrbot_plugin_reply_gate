@@ -56,7 +56,7 @@ class MessageBatch:
     past_messages: list[dict] = field(default_factory=list)
     group_duplicates: set[str] = field(default_factory=set)
     mentioned: bool = False
-    image_in_past: bool = False
+    judging: bool = False
 
     async def wait_other_handlers(self) -> None:
         """Wait until sibling pipelines have finished their message handlers."""
@@ -77,7 +77,9 @@ class MessageBatcher:
         self._active: set[MessageBatch] = set()
         self._closed = False
 
-    async def join(self, event, idle: float, maximum: float) -> BatchMember:
+    async def join(
+        self, event, idle: float, maximum: float, *, immediate: bool = False
+    ) -> BatchMember:
         if self._closed:
             raise asyncio.CancelledError
         now = asyncio.get_running_loop().time()
@@ -89,17 +91,61 @@ class MessageBatcher:
         else:
             batch = head
         member = BatchMember(event, batch, event.cleanup_temporary_local_files)
+        if immediate:
+            # Ownership moves only before any judgment preparation begins.
+            pending = sorted(
+                (
+                    b
+                    for b in self._active
+                    if b is not batch
+                    and b.key == batch.key
+                    and not b.judging
+                    and not b.done.is_set()
+                ),
+                key=lambda b: b.first,
+            )
+            moved = []
+            for old in pending:
+                moved.extend(old.members)
+                old.members = []
+                old.done.set()
+                old.ready.set()
+                if old.timer is not None:
+                    old.timer.cancel()
+                self._active.discard(old)
+            moved.extend(batch.members)
+            batch.members = moved
+            for earlier in batch.members:
+                earlier.batch = batch
+                earlier.event.set_extra("reply_gate_batch_follower", True)
+            batch.mentioned = True
         batch.members.append(member)
         batch.last = now
         batch.changed.set()
         event.cleanup_temporary_local_files = lambda: self._event_finished(member)
         event.set_extra("reply_gate_batch_member", member)
-        if batch.timer is None:
+        if immediate:
+            if batch.timer is not None:
+                batch.timer.cancel()
+            batch.owner = member
+            batch.ready.set()
+            self._heads.pop(batch.key, None)
+        elif batch.timer is None:
             batch.timer = asyncio.create_task(self._settle(batch))
         await batch.ready.wait()
+        batch = member.batch
         if self._closed or batch.done.is_set():
             raise asyncio.CancelledError
         return member
+
+    def begin(self, member: BatchMember) -> bool:
+        """Atomically leave the pending pool before preparing any judge input."""
+        batch = member.batch
+        if member is not batch.owner or batch.done.is_set():
+            return False
+        batch.judging = True
+        member.event.set_extra("reply_gate_batch", batch)
+        return True
 
     async def _settle(self, batch: MessageBatch) -> None:
         while batch.members:

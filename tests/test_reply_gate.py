@@ -9,7 +9,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 from aiohttp import web
 from astrbot.api import AstrBotConfig
 from astrbot.api.message_components import At, Plain
@@ -36,6 +35,7 @@ from astrbot.core.provider.entities import LLMResponse, ProviderMeta, ProviderRe
 from astrbot.core.provider.provider import Provider
 from astrbot.core.star.star import star_map
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
+
 from astrbot_plugin_reply_gate.main import ReplyGate
 from astrbot_plugin_reply_gate.shared_context import (
     DEFAULT_INSTRUCTIONS,
@@ -47,7 +47,6 @@ from astrbot_plugin_reply_gate.shared_context import (
     fit_context,
     parse_probability,
 )
-from openai import APIStatusError
 
 
 def make_event(
@@ -78,43 +77,6 @@ class ContextTests(unittest.TestCase):
         self.assertLessEqual(context_cost(payload), 60000)
         with self.assertRaises(ValueError):
             fit_context(history, current, "PERSONA", DEFAULT_INSTRUCTIONS, 65536, True)
-
-    def test_old_media_round_is_removed_from_decision_window(self):
-        history = [
-            {"role": "user", "content": "earlier"},
-            {"role": "assistant", "content": "earlier answer"},
-            {
-                "role": "user",
-                "content": [{"type": "image_url", "image_url": {"url": "test-image"}}],
-            },
-            {"role": "assistant", "content": "image answer"},
-            {"role": "user", "content": "recent text"},
-            {"role": "assistant", "content": "recent answer"},
-        ]
-        current = {"role": "user", "content": "latest"}
-        window, payload = fit_context(
-            history, current, "PERSONA", DEFAULT_INSTRUCTIONS, 60000, True
-        )
-        self.assertEqual(window.dropped_messages, 4)
-        self.assertEqual(window.history, history[4:])
-        self.assertEqual(payload["state"]["messages"], window.messages())
-        self.assertNotIn("images", payload)
-
-    def test_current_media_is_rejected_instead_of_hidden_from_decision(self):
-        with self.assertRaisesRegex(ContextLimitError, "unsupported_media"):
-            fit_context(
-                [],
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": "test-image"}}
-                    ],
-                },
-                "PERSONA",
-                DEFAULT_INSTRUCTIONS,
-                60000,
-                True,
-            )
 
     def test_same_model_family_snapshot_is_accepted(self):
         self.assertEqual(
@@ -278,6 +240,16 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                     )
                 ),
             ),
+        )
+        self.context.persona_manager = SimpleNamespace(
+            resolve_selected_persona=AsyncMock(
+                return_value=(
+                    "p",
+                    {"prompt": "PERSONA: you are a helpful group member."},
+                    None,
+                    False,
+                )
+            )
         )
         self.vision_provider = MagicMock(spec=Provider)
         self.vision_provider.provider_config = {
@@ -511,28 +483,6 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("reply_threshold", saved)
                 self.assertEqual(saved["reply_activity"], 0.5)
 
-    async def test_configured_prompt_reaches_text_and_image_judges_only(self):
-        custom = "CUSTOM_POLICY: 按当前人格决定是否接话。"
-        self.config["decision_instructions"] = custom
-        await self.dispatch(make_event("文字消息"))
-        question = self.requests[-1]["body"]["questions"]["should_reply"]
-        self.assertEqual(question["instructions"], custom)
-        self.assertNotIn("回应日常社交互动", json.dumps(question, ensure_ascii=False))
-        self.extra_parts.append(
-            ImageURLPart(
-                image_url=ImageURLPart.ImageURL(url="data:image/png;base64,dGVzdA==")
-            )
-        )
-        await self.dispatch(make_event("图片消息"))
-        call = self.vision_calls[-1]
-        self.assertIn(custom, call["system_prompt"])
-        self.assertIn(custom, call["contexts"][-1]["content"])
-        self.assertNotIn(DEFAULT_INSTRUCTIONS, call["system_prompt"])
-        for request in self.prepared_requests:
-            self.assertNotIn(custom, request.system_prompt)
-            self.assertNotIn(custom, str(request.contexts))
-        self.assertEqual(self.prepared_requests, self.request_snapshots)
-
     async def test_mention_without_text_passes_real_empty_message_guard(self):
         self.config["failure_default_reply"] = False
         e = make_event("   ", mention=True)
@@ -628,7 +578,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         event = await self.dispatch(make_event())
         decision = json.dumps(self.requests[-1]["body"])
         self.assertNotIn("record-0", decision)
-        self.assertIn("record-9", decision)
+        self.assertNotIn("record-9", decision)
         self.assertIn("record-0", json.dumps(self.reply_calls[-1]))
         self.assertIn("record-0", json.dumps(self.histories[event.unified_msg_origin]))
         self.assertEqual(self.prepared_requests[-1], self.request_snapshots[-1])
@@ -655,91 +605,6 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             event.get_extra("reply_gate_decision")["reason"], "api_url_missing"
         )
-
-    async def test_current_image_uses_reply_model_with_full_context_and_no_bailian_key(
-        self,
-    ):
-        self.config["bailian_api_key"] = ""
-        original = [
-            {"role": "user", "content": "OLD" * 4000},
-            {"role": "assistant", "content": "old reply"},
-        ]
-        self.histories[make_event().unified_msg_origin] = copy.deepcopy(original)
-        self.extra_parts.append(
-            ImageURLPart(
-                image_url=ImageURLPart.ImageURL(url="data:image/png;base64,dGVzdA==")
-            )
-        )
-        event = await self.dispatch(make_event("看这张图"))
-        self.assertEqual(self.requests, [])
-        self.assertEqual(len(self.reply_calls), 1)
-        self.assertEqual(len(self.vision_calls), 1)
-        self.assertEqual(self.vision_calls[0]["contexts"][:2], original)
-        self.assertIn("data:image/png;base64,", json.dumps(self.vision_calls[0]))
-        self.assertIn("MEMORY", json.dumps(self.vision_calls[0]))
-        self.assertIsNone(self.vision_calls[0]["func_tool"])
-        self.assertEqual(self.prepared_requests[-1], self.request_snapshots[-1])
-        self.assertEqual(
-            event.get_extra("reply_gate_decision")["source"], "reply_model_vision"
-        )
-        await self.dispatch(make_event("看这张图", mention=True))
-        self.assertEqual(self.requests, [])
-        self.assertEqual(len(self.reply_calls), 2)
-        self.assertEqual(len(self.vision_calls), 1)
-
-    async def test_image_decision_honors_selected_provider_and_model(self):
-        self.extra_parts.append(
-            ImageURLPart(
-                image_url=ImageURLPart.ImageURL(url="data:image/png;base64,dGVzdA==")
-            )
-        )
-        e = make_event("image")
-        e.set_extra("selected_provider", "explicit-provider")
-        e.set_extra("selected_model", "explicit-model")
-        await self.dispatch(e)
-        self.context.get_provider_by_id.assert_called_with("explicit-provider")
-        self.assertEqual(self.vision_calls[0]["model"], "explicit-model")
-
-    async def test_image_rejection_stops_but_invalid_output_passes_full_history(
-        self,
-    ):
-        self.extra_parts.append(
-            ImageURLPart(
-                image_url=ImageURLPart.ImageURL(url="data:image/png;base64,dGVzdA==")
-            )
-        )
-        for value in [False, "invalid"]:
-            with self.subTest(value=value):
-                self.vision_decision = False
-                self.vision_response = "not json" if value == "invalid" else None
-                e = make_event("original image message", session=str(value))
-                original = [{"role": "user", "content": "OLD" * 3000}]
-                self.histories[e.unified_msg_origin] = copy.deepcopy(original)
-                await self.dispatch(e)
-                self.assertEqual(e.is_stopped(), value is False)
-                saved = self.histories[e.unified_msg_origin]
-                self.assertEqual(saved[:1], original)
-                self.assertIn("image_url", json.dumps(saved))
-                self.assertEqual(self.prepared_requests[-1], self.request_snapshots[-1])
-        self.assertEqual(self.requests, [])
-        self.assertEqual(len(self.reply_calls), 1)
-
-    async def test_text_after_an_unanswered_image_can_be_judged(self):
-        self.vision_decision = False
-        self.extra_parts.append(
-            ImageURLPart(
-                image_url=ImageURLPart.ImageURL(url="data:image/png;base64,dGVzdA==")
-            )
-        )
-        await self.dispatch(make_event("看这张图"))
-        self.extra_parts.pop()
-        await self.dispatch(make_event("继续聊文字"))
-        self.assertEqual(len(self.requests), 1)
-        self.assertEqual(len(self.reply_calls), 1)
-        self.assertNotIn("image_url", json.dumps(self.requests[0]["body"]))
-        self.assertIn("image_url", json.dumps(self.reply_calls[0]["contexts"]))
-        saved = self.histories[make_event().unified_msg_origin]
-        self.assertIn("image_url", json.dumps(saved))
 
     async def test_declined_message_is_visible_to_the_next_decision(self):
         self.probability = 0.1
@@ -890,78 +755,6 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                         2 if fallback else 1,
                     )
 
-    async def test_image_failures_follow_policy_and_retain_full_unsent_images(self):
-        self.extra_parts.append(
-            ImageURLPart(
-                image_url=ImageURLPart.ImageURL(url="data:image/png;base64,dGVzdA==")
-            )
-        )
-        normal_judge = self.vision_provider.text_chat.side_effect
-        for fallback in (False, True):
-            for mode, reason in (
-                ("invalid_json", "invalid_vision_json"),
-                ("invalid_schema", "invalid_vision_schema"),
-                ("empty", "empty_vision_decision"),
-                ("timeout", "TimeoutError"),
-                ("http", "provider_http_402"),
-            ):
-                with self.subTest(fallback=fallback, mode=mode):
-                    self.config["failure_default_reply"] = fallback
-                    self.vision_response = {
-                        "invalid_json": "not json",
-                        "invalid_schema": '{"should_reply":"false"}',
-                        "empty": "",
-                    }.get(mode)
-                    self.vision_provider.text_chat.side_effect = (
-                        TimeoutError()
-                        if mode == "timeout"
-                        else APIStatusError(
-                            "private-error-body",
-                            response=httpx.Response(
-                                402,
-                                request=httpx.Request(
-                                    "POST", "https://example.invalid"
-                                ),
-                            ),
-                            body={"private": "private-error-body"},
-                        )
-                        if mode == "http"
-                        else normal_judge
-                    )
-                    event = make_event(
-                        "original image", session=f"image-{fallback}-{mode}"
-                    )
-                    original = [{"role": "user", "content": "OLD" * 3000}]
-                    self.histories[event.unified_msg_origin] = copy.deepcopy(original)
-                    replies_before = len(self.reply_calls)
-                    saves_before = self.context.conversation_manager.update_conversation.await_count
-                    with self.assertLogs(self.plugin.logger, level="WARNING") as logs:
-                        await self.dispatch(event)
-                    result = event.get_extra("reply_gate_decision")
-                    self.assertEqual(event.is_stopped(), not fallback)
-                    self.assertIs(result["reply"], fallback)
-                    self.assertEqual(result["source"], "error_fallback")
-                    self.assertEqual(result["decision_source"], "reply_model_vision")
-                    self.assertEqual(result["reason"], reason)
-                    self.assertNotIn("private-error-body", str(logs.output))
-                    self.assertEqual(
-                        len(self.reply_calls) - replies_before, int(fallback)
-                    )
-                    self.assertEqual(
-                        self.prepared_requests[-1], self.request_snapshots[-1]
-                    )
-                    saved = self.histories[event.unified_msg_origin]
-                    self.assertEqual(saved[:1], original)
-                    self.assertIn("image_url", json.dumps(saved))
-                    self.assertNotIn("MEMORY", json.dumps(saved))
-                    self.assertEqual(len(saved), 3 if fallback else 2)
-                    self.assertEqual(
-                        self.context.conversation_manager.update_conversation.await_count
-                        - saves_before,
-                        2 if fallback else 1,
-                    )
-        self.assertEqual(self.requests, [])
-
     async def test_failure_policy_does_not_override_valid_text_or_image_decisions(self):
         for fallback in (False, True):
             for image in (False, True):
@@ -1001,54 +794,6 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         await self.dispatch(make_event("What colour was it?"))
         self.assertIn("blue cat", json.dumps(self.requests[-1]["body"]))
         self.assertEqual(len(self.reply_calls), 1)
-
-    async def test_vision_timeout_passes_but_cancellation_still_cancels(self):
-        self.extra_parts.append(
-            ImageURLPart(
-                image_url=ImageURLPart.ImageURL(url="data:image/png;base64,dGVzdA==")
-            )
-        )
-        self.vision_provider.text_chat.side_effect = TimeoutError()
-        e = await self.dispatch(make_event("image timeout"))
-        self.assertFalse(e.is_stopped())
-        self.assertEqual(len(self.reply_calls), 1)
-        self.assertEqual(
-            e.get_extra("reply_gate_decision")["decision_source"], "reply_model_vision"
-        )
-        self.assertEqual(self.prepared_requests[-1], self.request_snapshots[-1])
-        self.vision_provider.text_chat.side_effect = asyncio.CancelledError()
-        cancelled = make_event("cancelled", session="cancelled")
-        cancelled.set_extra("reply_gate_candidate", True)
-        req = ProviderRequest(
-            prompt="cancelled", extra_user_content_parts=copy.deepcopy(self.extra_parts)
-        )
-        with self.assertRaises(asyncio.CancelledError):
-            await self.plugin.select_reply(cancelled, req)
-        self.assertTrue(cancelled.is_stopped())
-        self.assertEqual(len(self.reply_calls), 1)
-
-    async def test_vision_http_error_logs_only_status_and_passes_original_request(self):
-        self.extra_parts.append(
-            ImageURLPart(
-                image_url=ImageURLPart.ImageURL(url="data:image/png;base64,dGVzdA==")
-            )
-        )
-        self.vision_provider.text_chat.side_effect = APIStatusError(
-            "private-provider-error-body",
-            response=httpx.Response(
-                402, request=httpx.Request("POST", "https://example.invalid")
-            ),
-            body={"private": "private-provider-error-body"},
-        )
-        with self.assertLogs(self.plugin.logger, level="WARNING") as logs:
-            e = await self.dispatch(make_event("image"))
-        self.assertFalse(e.is_stopped())
-        self.assertEqual(
-            e.get_extra("reply_gate_decision")["reason"], "provider_http_402"
-        )
-        self.assertNotIn("private-provider-error-body", str(logs.output))
-        self.assertEqual(len(self.reply_calls), 1)
-        self.assertEqual(self.prepared_requests[-1], self.request_snapshots[-1])
 
     async def test_histories_are_isolated_by_conversation(self):
         self.probability = 0.1
@@ -1150,22 +895,6 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(next_event.is_stopped())
         self.assertEqual(len(self.reply_calls), 1)
 
-    async def test_mention_and_image_decisions_clear_previous_text_credit(self):
-        self.config["reply_activity"] = 0.6
-        self.probability = 0.6
-        self.assertTrue((await self.dispatch(make_event())).is_stopped())
-        self.assertFalse((await self.dispatch(make_event(mention=True))).is_stopped())
-        self.assertTrue((await self.dispatch(make_event())).is_stopped())
-        self.extra_parts.append(
-            ImageURLPart(
-                image_url=ImageURLPart.ImageURL(url="data:image/png;base64,dGVzdA==")
-            )
-        )
-        self.vision_decision = False
-        self.assertTrue((await self.dispatch(make_event())).is_stopped())
-        self.extra_parts = []
-        self.assertTrue((await self.dispatch(make_event())).is_stopped())
-
     async def test_activity_upgrade_preserves_saved_activity_and_ignores_legacy_threshold(
         self,
     ):
@@ -1200,34 +929,6 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                     {k: saved[k] for k in original if k != "reply_threshold"},
                     {k: v for k, v in original.items() if k != "reply_threshold"},
                 )
-
-    async def test_visual_probability_shares_credit_with_text_and_honors_activity(self):
-        image = ImageURLPart(
-            image_url=ImageURLPart.ImageURL(url="data:image/png;base64,dGVzdA==")
-        )
-        self.config["reply_activity"] = 0.6
-        self.vision_decision = 0.6
-        self.extra_parts = [image]
-        first = await self.dispatch(make_event("image"))
-        self.assertTrue(first.is_stopped())
-        self.assertAlmostEqual(
-            first.get_extra("reply_gate_decision")["probability"], 0.6
-        )
-        self.extra_parts = []
-        self.probability = 0.6
-        second = await self.dispatch(make_event("text"))
-        self.assertFalse(second.is_stopped())
-        self.assertEqual(len(self.reply_calls), 1)
-        self.assertEqual(self.prepared_requests, self.request_snapshots)
-        self.extra_parts = [image]
-        for activity, score, expected in [(0.01, 0.9, False), (0.99, 0.1, True)]:
-            self.config["reply_activity"] = activity
-            self.vision_decision = score
-            result = await self.dispatch(make_event("image", session=str(activity)))
-            self.assertIs(result.get_extra("reply_gate_decision")["reply"], expected)
-            self.assertEqual(
-                result.get_extra("reply_gate_decision")["source"], "reply_model_vision"
-            )
 
     async def test_failed_judgments_do_not_count_and_fallback_reply_clears_credit(self):
         self.config["reply_activity"] = 0.6
@@ -1292,7 +993,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(text, decision_text)
             self.assertIn(text, reply_text)
         self.assertIn("+08:00", decision_text)
-        self.assertIn("本轮合并了 3 条", decision_text)
+        self.assertEqual(self.requests[0]["body"]["state"]["pending_count"], 3)
         self.assertIn("本轮合并了 3 条", reply_text)
         saved = self.histories[events[0].unified_msg_origin]
         self.assertEqual([m["role"] for m in saved], ["user"] * 3 + ["assistant"])
@@ -1352,74 +1053,6 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.requests, [])
         self.assertEqual(self.reply_calls, [])
         self.assertNotIn("private-database-message", str(logs.output))
-
-    async def test_busy_messages_start_parallel_batch_and_earlier_mention_bypasses_gate(
-        self,
-    ):
-        self.enable_batching()
-        self.reply_release = asyncio.Event()
-        first = asyncio.create_task(self.dispatch(make_event("first")))
-        await asyncio.wait_for(self.reply_started.wait(), 1)
-        events = [
-            make_event("mention in middle", mention=True, sender="alice"),
-            make_event("new topic", sender="bob"),
-            make_event("last detail", sender="alice"),
-        ]
-        tasks = [asyncio.create_task(self.dispatch(e)) for e in events]
-        await asyncio.sleep(0.2)
-        self.assertEqual(len(self.requests), 1)
-        self.assertEqual(len(self.reply_calls), 2)
-        self.assertFalse(tasks[-1].done())
-        self.reply_release.set()
-        await asyncio.wait_for(asyncio.gather(first, *tasks), 2)
-        self.assertEqual(len(self.requests), 1)
-        self.assertEqual(len(self.reply_calls), 2)
-        self.assertEqual(
-            events[-1].get_extra("reply_gate_decision")["source"], "mention"
-        )
-        self.assertIn("new topic", json.dumps(self.reply_calls[-1]))
-        self.assertIn("last detail", json.dumps(self.reply_calls[-1]))
-        self.assertEqual(len(self.histories[events[0].unified_msg_origin]), 6)
-
-    async def test_earlier_image_and_quote_remain_visible_in_shared_visual_request(
-        self,
-    ):
-        from astrbot.api.message_components import Image, Reply
-
-        self.enable_batching()
-        first = make_event("image from alice", sender="alice")
-        first.message_obj.message.append(
-            Image.fromBase64(
-                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jewAAAABJRU5ErkJggg=="
-            )
-        )
-        first.message_obj.message.append(
-            Reply(
-                id="quote",
-                message_str="quoted original",
-                chain=[Plain("quoted original")],
-            )
-        )
-        second = make_event("bob asks about it", sender="bob")
-        await asyncio.wait_for(
-            asyncio.gather(self.dispatch(first), self.dispatch(second)), 3
-        )
-        self.assertEqual(self.requests, [])
-        self.assertEqual(len(self.vision_calls), 1)
-        self.assertEqual(len(self.reply_calls), 1)
-        self.assertIn(
-            "最后 2 条用户消息", self.vision_calls[0]["contexts"][-1]["content"]
-        )
-        for payload in [
-            self.vision_calls[0],
-            self.reply_calls[0],
-            self.histories[first.unified_msg_origin],
-        ]:
-            text = json.dumps(payload)
-            self.assertIn("image_url", text)
-            self.assertIn("data:image/png;base64,", text)
-            self.assertIn("quoted original", text)
-            self.assertIn("bob asks about it", text)
 
     async def test_saved_merge_settings_survive_upgrade_and_receive_defaults(self):
         schema = json.loads(
@@ -1531,8 +1164,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             first = incoming("initial")
             active = asyncio.create_task(scheduler.execute(first))
             await asyncio.wait_for(started.wait(), 2)
-            early = incoming("second", mention=True)
-            latest = incoming("third")
+            early = incoming("second")
+            latest = incoming("third", mention=True)
             pending = [
                 asyncio.create_task(scheduler.execute(e)) for e in [early, latest]
             ]
@@ -1571,22 +1204,6 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(len(sent), 3)
 
-    async def test_merged_mention_bypasses_zero_activity_and_missing_key(self):
-        self.enable_batching()
-        self.config.update(
-            reply_activity=0, bailian_api_key="", failure_default_reply=False
-        )
-        events = [
-            make_event("", mention=True),
-            make_event("details from another member", sender="bob"),
-        ]
-        await asyncio.wait_for(asyncio.gather(*(self.dispatch(e) for e in events)), 2)
-        self.assertEqual(self.requests, [])
-        self.assertEqual(len(self.reply_calls), 1)
-        self.assertEqual(
-            events[-1].get_extra("reply_gate_decision")["source"], "mention"
-        )
-
     async def test_failed_closed_batch_preserves_all_messages_and_releases_next_batch(
         self,
     ):
@@ -1618,3 +1235,87 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         empty = make_event("")
         await asyncio.wait_for(self.plugin.observe_message(empty), 0.2)
         self.assertIsNone(empty.get_extra("reply_gate_batch_member"))
+
+    async def test_images_and_history_followups_use_only_one_text_judge(self):
+        self.config["decision_instructions"] = "唯一规则和输出提醒"
+        self.extra_parts.append(
+            ImageURLPart(
+                image_url=ImageURLPart.ImageURL(url="data:image/png;base64,dGVzdA==")
+            )
+        )
+        first = await self.dispatch(make_event("看这个"))
+        self.assertEqual(len(self.requests), 1)
+        payload = self.requests[-1]["body"]
+        self.assertIn("[图片]", json.dumps(payload, ensure_ascii=False))
+        self.assertNotIn("image_url", json.dumps(payload))
+        self.assertEqual(
+            payload["questions"]["should_reply"],
+            {"type": "noul", "instructions": "唯一规则和输出提醒"},
+        )
+        self.assertNotIn("MEMORY: user likes cats", json.dumps(payload))
+        self.assertIn("PERSONA", payload["state"]["memory"])
+        self.assertEqual(self.vision_calls, [])
+        self.extra_parts = []
+        await self.dispatch(make_event("刚才那张图什么意思"))
+        self.assertIn(
+            "看这个", json.dumps(self.requests[-1]["body"], ensure_ascii=False)
+        )
+        self.assertIn(
+            "这是测试回复", json.dumps(self.requests[-1]["body"], ensure_ascii=False)
+        )
+        self.assertEqual(first.get_extra("reply_gate_decision")["source"], MODEL)
+
+    async def test_mention_claims_only_messages_not_yet_judging(self):
+        self.enable_batching()
+        self.config.update(merge_idle_seconds=30, merge_max_wait_seconds=60)
+        earlier = make_event("pending ordinary message")
+        pending = asyncio.create_task(self.dispatch(earlier))
+        await asyncio.sleep(0.01)
+        at = make_event("answer now", mention=True)
+        await asyncio.wait_for(asyncio.gather(pending, self.dispatch(at)), 1)
+        self.assertEqual(self.requests, [])
+        self.assertEqual(len(self.reply_calls), 1)
+        self.assertIn("pending ordinary message", json.dumps(self.reply_calls[0]))
+        self.assertEqual(at.get_extra("reply_gate_decision")["source"], "mention")
+        self.config.update(merge_idle_seconds=0, merge_max_wait_seconds=0)
+        self.delay = 0.1
+        judging = make_event("already judging")
+        task = asyncio.create_task(self.dispatch(judging))
+        for _ in range(100):
+            if self.requests:
+                break
+            await asyncio.sleep(0.002)
+        await self.dispatch(make_event("new mention", mention=True))
+        await task
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(len(self.reply_calls), 3)
+
+    async def test_formal_reply_refreshes_history_after_slow_judgment(self):
+        self.delay = 0.05
+        event = make_event("current input")
+        task = asyncio.create_task(self.dispatch(event))
+        for _ in range(100):
+            if self.requests:
+                break
+            await asyncio.sleep(0.002)
+        self.histories[event.unified_msg_origin].insert(
+            0, {"role": "assistant", "content": "other round just completed"}
+        )
+        await task
+        self.assertIn("other round just completed", json.dumps(self.reply_calls[-1]))
+        self.assertEqual(
+            json.dumps(self.histories[event.unified_msg_origin]).count("current input"),
+            1,
+        )
+
+    async def test_direct_hook_saves_original_image_when_judgment_declines(self):
+        self.probability = 0.1
+        event = make_event('direct hook image')
+        event.set_extra('reply_gate_candidate', True)
+        req = ProviderRequest(prompt='direct hook image', image_urls=['data:image/png;base64,dGVzdA=='], conversation=SimpleNamespace(cid=event.unified_msg_origin,token_usage=0))
+        await self.plugin.select_reply(event, req)
+        self.assertTrue(event.is_stopped())
+        saved = json.dumps(self.histories[event.unified_msg_origin])
+        self.assertIn('image_url',saved)
+        self.assertIn('data:image/png;base64,dGVzdA==',saved)
+        self.assertNotIn('image_url',json.dumps(self.requests[-1]['body']))

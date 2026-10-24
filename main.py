@@ -16,7 +16,6 @@ from astrbot.api.star import Context, Star
 from astrbot.core.agent.message import Message, dump_messages_with_checkpoints
 from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.filter.command_group import CommandGroupFilter
-from openai import APIStatusError
 
 from .activity_gate import DEFAULT_ACTIVITY, ReplyAccumulator, validate_activity
 from .batch_context import (
@@ -24,6 +23,7 @@ from .batch_context import (
     prepare_past_messages,
     remove_duplicate_group_records,
 )
+from .decision_input import build_input, memory_snapshot
 from .message_batch import MessageBatcher, merge_delays
 from .parallel_runtime import ParallelRuntime
 from .shared_context import (
@@ -34,7 +34,6 @@ from .shared_context import (
     fit_context,
     parse_probability,
 )
-from .vision_gate import has_image, judge_image
 
 
 class ReplyGate(Star):
@@ -110,7 +109,15 @@ class ReplyGate(Star):
                 "Reply gate: invalid_merge_delay; using 1 and 3 seconds"
             )
             idle, maximum = 1.0, 3.0
-        member = await self._batcher.join(event, idle, maximum)
+        member = await self._batcher.join(
+            event,
+            idle,
+            maximum,
+            immediate=any(
+                isinstance(p, At) and str(p.qq) == str(event.get_self_id())
+                for p in parts
+            ),
+        )
         if member is not member.batch.owner:
             # Other plugins still observe the original message, while this event
             # does not enqueue another LLM turn or enter native follow-up capture.
@@ -128,6 +135,10 @@ class ReplyGate(Star):
     @filter.on_waiting_llm_request(priority=maxsize)
     async def prepare_batch(self, event: AstrMessageEvent) -> None:
         """Capture siblings after their handlers and before the session lock."""
+        member = event.get_extra("reply_gate_batch_member")
+        if member is not None and not self._batcher.begin(member):
+            event.stop_event()
+            return
         if event.get_extra("reply_gate_batch_follower", False):
             event.stop_event()
             return
@@ -154,6 +165,9 @@ class ReplyGate(Star):
             return
         if event.get_extra("reply_gate_batch_expanded", False):
             return
+        event.set_extra(
+            "reply_gate_memory", await memory_snapshot(self.context, event, req)
+        )
         base_length = len(req.contexts)
         if len(batch.members) > 1:
             inject_past_messages(self.context, event, req, batch)
@@ -205,6 +219,7 @@ class ReplyGate(Star):
             return
 
         current = None
+        full_current = None
         started = time.monotonic()
         decision_source = "request_preparation"
         timeout = None
@@ -223,6 +238,7 @@ class ReplyGate(Star):
                 self.logger.info("Reply gate: reply=True source=activity activity=1")
                 return
             current = await req.assemble_context()
+            full_current = copy.deepcopy(current)
             instructions = str(self.config.get("decision_instructions") or "").strip()
             if not instructions:
                 instructions = DEFAULT_INSTRUCTIONS
@@ -233,64 +249,22 @@ class ReplyGate(Star):
                     {"reply": False, "source": "activity", "activity": activity},
                 )
                 self.logger.info("Reply gate: reply=False source=activity activity=0")
-            elif has_image(current) or (batch is not None and batch.image_in_past):
-                decision_source = "reply_model_vision"
-                timeout = float(self.config.get("vision_timeout_seconds", 30))
-                probability = await judge_image(
-                    self.context,
-                    event,
-                    req,
-                    current,
-                    instructions,
-                    timeout,
-                    batch_size=len(batch.members) if batch is not None else 1,
-                )
-                decision = self._accumulator.evaluate(
-                    balance_key, probability, activity
-                )
-                should_reply = decision.reply
-                event.set_extra(
-                    "reply_gate_decision",
-                    {
-                        "reply": should_reply,
-                        "source": "reply_model_vision",
-                        "probability": probability,
-                        "activity": activity,
-                        "accumulation_before": decision.before,
-                        "accumulation_change": decision.change,
-                        "accumulation_value": decision.accumulated,
-                        "accumulation_remaining": decision.remaining,
-                    },
-                )
-                self.logger.info(
-                    "Reply gate: reply=%s source=reply_model_vision full_context=True probability=%.4f activity=%.4f accumulation_before=%.4f accumulation_change=%s accumulation_value=%.4f accumulation_remaining=%.4f",
-                    should_reply,
-                    probability,
-                    activity,
-                    decision.before,
-                    f"{decision.change:.4f}"
-                    if decision.change is not None
-                    else "endpoint",
-                    decision.accumulated,
-                    decision.remaining,
-                )
             else:
                 decision_source = MODEL
                 timeout = float(self.config.get("timeout_seconds", 30))
-                history = [
-                    copy.deepcopy(msg)
-                    for msg in req.contexts
-                    if isinstance(msg, dict) and msg.get("role")
-                ]
+                await self._parallel.refresh_request(event, req)
+                history, current = await build_input(self.context, event, req)
+                memory = event.get_extra("reply_gate_memory", "")
                 # Only this detached decision window is trimmed. AstrBot retains
                 # ownership of the original request, context limits and persistence.
                 window, payload = fit_context(
                     history,
                     current,
-                    req.system_prompt,
+                    memory,
                     instructions,
                     int(self.config.get("context_budget", 60_000)),
                     bool(req.prompt and req.prompt.strip()),
+                    pending_count=len(batch.members) if batch is not None else 1,
                 )
                 key = str(self.config.get("bailian_api_key", "")).strip()
                 if not key:
@@ -367,18 +341,12 @@ class ReplyGate(Star):
                     "api_key_missing",
                     "api_url_missing",
                     "protected_context_too_large",
-                    "unsupported_media",
+                    "unprojected_media",
                     "context_budget_out_of_range",
                     "unexpected_decision_model",
                     "invalid_decision_response",
                     "invalid_decision_probability",
                     "invalid_reply_activity",
-                    "reply_provider_missing",
-                    "reply_provider_has_no_vision",
-                    "invalid_vision_decision",
-                    "empty_vision_decision",
-                    "invalid_vision_json",
-                    "invalid_vision_schema",
                 }
                 else (
                     str(exc)
@@ -387,8 +355,6 @@ class ReplyGate(Star):
                     else type(exc).__name__
                 )
             )
-            if isinstance(exc, APIStatusError):
-                reason = f"provider_http_{exc.status_code}"
             fallback_reply = activity != 0 and bool(
                 self.config.get("failure_default_reply", True)
             )
@@ -424,7 +390,7 @@ class ReplyGate(Star):
         parallel = event.get_extra("reply_gate_parallel")
         if (
             req.conversation
-            and current is not None
+            and full_current is not None
             and not (parallel is not None and parallel.admitted is not None)
         ):
             # AstrBot consumes pending group context while assembling a request.
@@ -433,7 +399,7 @@ class ReplyGate(Star):
                 # Keep existing records (including checkpoints) intact and append
                 # the full current turn, excluding temporary persona/memory parts.
                 history = copy.deepcopy(req.contexts) + dump_messages_with_checkpoints(
-                    [Message.model_validate(current)]
+                    [Message.model_validate(full_current)]
                 )
                 await self.context.conversation_manager.update_conversation(
                     event.unified_msg_origin,
