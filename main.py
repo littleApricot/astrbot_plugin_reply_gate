@@ -42,9 +42,32 @@ class ReplyGate(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context, config)
         self.config = config
-        if not str(config.get("decision_instructions") or "").strip():
-            # Materialize the editable default instead of hiding it in code.
-            config["decision_instructions"] = DEFAULT_INSTRUCTIONS
+        previous_instructions = str(config.get("decision_instructions") or "")
+        instructions = previous_instructions
+        # Replace only known legacy scope clauses; preserve custom policy text.
+        for old, new in (
+            (
+                "判断机器人此刻是否有充分理由回应当前这批新消息。",
+                "判断机器人此刻是否有充分理由接话。",
+            ),
+            (
+                "state.messages 是按时间排列的最近历史与新消息，最后 pending_count 条用户消息属于本批待回复消息。",
+                "state.messages 是按时间排列的可见聊天记录，包括用户发言和机器人已经说过的话。",
+            ),
+            (
+                "历史和记忆用于理解称呼、关系与话题，不要重新回答历史中的问题。",
+                "结合整个可见上下文判断此刻是否值得回应，较早的话题也可以接。是否重复依据机器人实际已经说过的内容判断。",
+            ),
+            (
+                "记忆中的回复约定只在当前消息满足其条件时适用。",
+                "记忆中的回复约定按可见对话是否满足其条件判断。",
+            ),
+        ):
+            instructions = instructions.replace(old, new)
+        if not instructions.strip():
+            instructions = DEFAULT_INSTRUCTIONS
+        if instructions != previous_instructions:
+            config["decision_instructions"] = instructions
             if isinstance(config, AstrBotConfig):
                 config.save_config()
         self._http: aiohttp.ClientSession | None = None
@@ -258,7 +281,6 @@ class ReplyGate(Star):
                     instructions,
                     int(self.config.get("context_budget", 60_000)),
                     bool(req.prompt and req.prompt.strip()),
-                    pending_count=len(batch.members) if batch is not None else 1,
                 )
                 key = str(self.config.get("bailian_api_key", "")).strip()
                 if not key:

@@ -993,7 +993,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(text, decision_text)
             self.assertIn(text, reply_text)
         self.assertIn("+08:00", decision_text)
-        self.assertEqual(self.requests[0]["body"]["state"]["pending_count"], 3)
+        self.assertNotIn("pending_count", self.requests[0]["body"]["state"])
         self.assertIn("本轮合并了 3 条", reply_text)
         saved = self.histories[events[0].unified_msg_origin]
         self.assertEqual([m["role"] for m in saved], ["user"] * 3 + ["assistant"])

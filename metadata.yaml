@@ -1,7 +1,7 @@
 name: astrbot_plugin_reply_gate
 display_name: 回复判断
 desc: 统一文字判断、完整记忆优先、@ 立即接管尚未开始判断的消息及最新共享历史。
-version: v0.8.1
+version: v0.8.2
 author: littleApricot
 repo: https://github.com/littleApricot/astrbot_plugin_reply_gate
 astrbot_version: ">=4.29.1,<4.30.0"
