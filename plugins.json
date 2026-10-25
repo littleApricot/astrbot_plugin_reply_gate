@@ -81,9 +81,9 @@
     "name": "astrbot_plugin_tool_prompts",
     "display_name": "工具说明编辑",
     "desc": "统一查看工具、直接启停插件和 MCP 工具，自定义模型看到的工具及参数说明，支持恢复默认。",
-    "version": "v0.2.1",
+    "version": "v0.2.2",
     "repo": "https://github.com/littleApricot/astrbot_plugin_tool_prompts",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_tool_prompts/archive/refs/tags/v0.2.1.zip",
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_tool_prompts/archive/refs/tags/v0.2.2.zip",
     "astrbot_version": ">=4.29.1,<4.30.0"
   }
 }
