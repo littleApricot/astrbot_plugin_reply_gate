@@ -57,7 +57,7 @@ class ParallelRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.runtime.bridge, "register"):
             internal.register_active_runner(event.unified_msg_origin, runner)
 
-    async def test_native_locks_allow_many_batches_but_other_events_still_serialize(
+    async def test_native_locks_serialize_batches_and_other_events(
         self,
     ):
         async def group(parallel):
@@ -82,7 +82,7 @@ class ParallelRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(*(worker() for _ in range(12)))
             return peak
 
-        self.assertEqual(await group(True), 12)
+        self.assertEqual(await group(True), 1)
         self.assertEqual(await group(False), 1)
 
     async def test_reverse_completion_preserves_users_tools_and_all_old_history(self):
@@ -180,7 +180,7 @@ class ParallelRuntimeTests(unittest.IsolatedAsyncioTestCase):
         try:
             await asyncio.create_task(new_run())
             replacement.close()
-            self.assertIsNot(internal.session_lock_manager, self.original_lock)
+            self.assertIs(internal.session_lock_manager, self.original_lock)
             event.cleanup_temporary_local_files()
             self.assertIs(internal.session_lock_manager, self.original_lock)
         finally:

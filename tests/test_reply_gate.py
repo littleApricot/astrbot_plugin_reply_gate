@@ -205,6 +205,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.histories = {}
         self.response_body = None
         self.delay = 0
+        self.decision_release = None
         self.reply_started = asyncio.Event()
         self.reply_release = None
         self.extra_parts = [TextPart(text="MEMORY: user likes cats").mark_as_temp()]
@@ -327,6 +328,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         )
         if self.delay:
             await asyncio.sleep(self.delay)
+        if self.decision_release is not None:
+            await self.decision_release.wait()
         return web.json_response(
             self.response_body
             if self.response_body is not None
@@ -1020,28 +1023,32 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.requests), 2)
         self.assertEqual(len(self.reply_calls), 1)
 
-    async def test_judgments_for_eight_batches_start_without_waiting_for_previous_results(
+    async def test_messages_during_judgment_form_one_serial_backlog(
         self,
     ):
         self.enable_batching(idle=0.005, maximum=0.01)
-        self.delay = 0.5
-        tasks = []
-        for i in range(8):
+        self.decision_release = asyncio.Event()
+        tasks = [asyncio.create_task(self.dispatch(make_event("serial-0")))]
+        for _ in range(100):
+            if self.requests:
+                break
+            await asyncio.sleep(0.002)
+        self.assertEqual(len(self.requests), 1)
+        for i in range(1, 8):
             tasks.append(
-                asyncio.create_task(self.dispatch(make_event(f"parallel-{i}")))
+                asyncio.create_task(self.dispatch(make_event(f"serial-{i}")))
             )
-            for _ in range(100):
-                if len(self.requests) == i + 1:
-                    break
-                await asyncio.sleep(0.001)
-            self.assertEqual(len(self.requests), i + 1)
+            await asyncio.sleep(0.02)
+            self.assertEqual(len(self.requests), 1)
         self.assertEqual(self.reply_calls, [])
-        self.assertEqual(self.plugin._http.connector.limit, 0)
+        self.decision_release.set()
         await asyncio.wait_for(asyncio.gather(*tasks), 3)
-        self.assertEqual(len(self.reply_calls), 8)
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(len(self.reply_calls), 2)
+        self.assertIn("这是测试回复", json.dumps(self.requests[-1], ensure_ascii=False))
         saved = json.dumps(self.histories[make_event().unified_msg_origin])
         for i in range(8):
-            self.assertEqual(saved.count(f"parallel-{i}"), 1)
+            self.assertEqual(saved.count(f"serial-{i}"), 1)
 
     async def test_parallel_history_failure_stops_before_judgment_or_generation(self):
         self.context.conversation_manager.update_conversation.side_effect = (
@@ -1081,7 +1088,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(saved["reply_activity"], 0.35)
                 self.assertEqual(saved["bailian_api_key"], old["bailian_api_key"])
 
-    async def test_real_scheduler_runs_batches_in_parallel_without_followup_capture(
+    async def test_real_scheduler_serializes_through_sending_and_coalesces_mentions(
         self,
     ):
         from astrbot.core.astr_main_agent import collect_initial_request
@@ -1101,6 +1108,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         scheduler = PipelineScheduler(self.pipeline_context)
         scheduler.stages = [self.waking, self.process_stage, respond]
         started, release = asyncio.Event(), asyncio.Event()
+        send_started, send_release = asyncio.Event(), asyncio.Event()
         sent = []
 
         async def build(*, event, plugin_context, config, **kwargs):
@@ -1144,6 +1152,9 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             e.message_obj.message_id = text
 
             async def send(chain):
+                if text == "initial":
+                    send_started.set()
+                    await send_release.wait()
                 sent.append(chain)
                 e._has_send_oper = True
 
@@ -1170,21 +1181,30 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 asyncio.create_task(scheduler.execute(e)) for e in [early, latest]
             ]
             await asyncio.sleep(0.15)
-            self.assertEqual(len(self.reply_calls), 2)
-            await asyncio.wait_for(asyncio.gather(*pending), 2)
-            self.assertEqual(len(sent), 1)
+            self.assertEqual(len(self.reply_calls), 1)
+            self.assertEqual(len(sent), 0)
+            self.assertTrue(all(not task.done() for task in pending))
             self.assertFalse(active.done())
-            self.assertIn("initial", json.dumps(self.reply_calls[1]))
             release.set()
+            await asyncio.wait_for(send_started.wait(), 2)
+            last = incoming("during send")
+            pending.append(asyncio.create_task(scheduler.execute(last)))
+            await asyncio.sleep(0.15)
+            self.assertEqual(len(self.reply_calls), 1)
+            self.assertEqual(len(self.requests), 1)
+            send_release.set()
             await asyncio.wait_for(asyncio.gather(active, *pending), 3)
         self.assertEqual(len(self.requests), 1)
         self.assertEqual(len(self.reply_calls), 2)
         self.assertEqual(len(sent), 2)
-        self.assertEqual(latest.get_extra("reply_gate_decision")["source"], "mention")
+        self.assertEqual(last.get_extra("reply_gate_decision")["source"], "mention")
+        next_input = json.dumps(self.reply_calls[1])
+        for text in ["merged reply", "second", "third", "during send"]:
+            self.assertIn(text, next_input)
         saved = self.histories[first.unified_msg_origin]
         self.assertEqual(
             [m["role"] for m in saved],
-            ["user", "user", "user", "assistant", "assistant"],
+            ["user", "assistant", "user", "user", "user", "assistant"],
         )
         self.assertEqual(self.plugin._batcher._heads, {})
         # A declined native run never reaches sending hooks; scheduler cleanup

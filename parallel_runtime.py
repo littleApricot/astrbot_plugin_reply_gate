@@ -1,4 +1,4 @@
-"""Scope native execution per batch and merge concurrent history writes."""
+"""Maintain batch history while preserving AstrBot's native session locks."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import asyncio
 import copy
 import inspect
 import json
-from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from types import MethodType, SimpleNamespace
@@ -42,7 +41,6 @@ class _Bridge:
         self.owners = set()
         self.runs = set()
         self.history_locks = {}
-        self.locks = internal.session_lock_manager
         self.capture = internal.try_capture_follow_up
         self.register = internal.register_active_runner
         self.unregister = internal.unregister_active_runner
@@ -90,18 +88,6 @@ class _Bridge:
         reset.__signature__ = signature
         self.reset_wrapper = reset
         ToolLoopAgentRunner.reset = reset
-
-        class Locks:
-            @asynccontextmanager
-            async def acquire_lock(self, origin):
-                run = bridge.current.get()
-                key = (
-                    (origin, run.key)
-                    if run is not None and origin == run.event.unified_msg_origin
-                    else origin
-                )
-                async with bridge.locks.acquire_lock(key):
-                    yield
 
         def runner_key(origin, runner):
             event = getattr(getattr(runner.run_context, "context", None), "event", None)
@@ -177,7 +163,6 @@ class _Bridge:
             )
 
         self.replacements = {
-            "session_lock_manager": Locks(),
             "try_capture_follow_up": capture,
             "register_active_runner": register,
             "unregister_active_runner": unregister,
@@ -191,7 +176,6 @@ class _Bridge:
         if self.owners or self.runs:
             return
         for name, original in (
-            ("session_lock_manager", self.locks),
             ("try_capture_follow_up", self.capture),
             ("register_active_runner", self.register),
             ("unregister_active_runner", self.unregister),
@@ -207,7 +191,11 @@ class _Bridge:
 
 
 class ParallelRuntime:
-    """Use short history locks, never a generation or judgment semaphore."""
+    """Retain the existing history bridge without bypassing session locks.
+
+    The class and event key stay compatible with batches surviving hot reloads.
+    MessageBatcher holds the session through sending and event cleanup.
+    """
 
     def __init__(self, context):
         self.context = context
@@ -218,6 +206,15 @@ class ParallelRuntime:
         if self.bridge is None:
             self.bridge = _Bridge()
             internal._reply_gate_parallel_bridge = self.bridge
+        # An older plugin instance may still own the bridge during hot reload.
+        # Restore only its own lock replacement, leaving other plugins intact.
+        legacy_locks = getattr(self.bridge, "locks", None)
+        if (
+            legacy_locks is not None
+            and internal.session_lock_manager
+            is self.bridge.replacements.get("session_lock_manager")
+        ):
+            internal.session_lock_manager = legacy_locks
         self.bridge.owners.add(self)
         run = ParallelRun(self, event)
         self.bridge.runs.add(run)

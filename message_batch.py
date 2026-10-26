@@ -66,7 +66,7 @@ class MessageBatch:
 
 
 class MessageBatcher:
-    """Collect independently of all batches already judging or replying.
+    """Keep one active reply and one collecting backlog per session.
 
     AstrBot 4.29's scheduler always invokes event cleanup in its finally block.
     Retain sibling attachments until their own shared request has finished.
@@ -74,6 +74,7 @@ class MessageBatcher:
 
     def __init__(self) -> None:
         self._heads: dict[str, MessageBatch] = {}
+        self._running: dict[str, MessageBatch] = {}
         self._active: set[MessageBatch] = set()
         self._closed = False
 
@@ -110,6 +111,8 @@ class MessageBatcher:
                 old.members = []
                 old.done.set()
                 old.ready.set()
+                if self._running.get(old.key) is old:
+                    self._running.pop(old.key, None)
                 if old.timer is not None:
                     old.timer.cancel()
                 self._active.discard(old)
@@ -124,13 +127,7 @@ class MessageBatcher:
         batch.changed.set()
         event.cleanup_temporary_local_files = lambda: self._event_finished(member)
         event.set_extra("reply_gate_batch_member", member)
-        if immediate:
-            if batch.timer is not None:
-                batch.timer.cancel()
-            batch.owner = member
-            batch.ready.set()
-            self._heads.pop(batch.key, None)
-        elif batch.timer is None:
+        if batch.timer is None:
             batch.timer = asyncio.create_task(self._settle(batch))
         await batch.ready.wait()
         batch = member.batch
@@ -148,9 +145,19 @@ class MessageBatcher:
         return True
 
     async def _settle(self, batch: MessageBatch) -> None:
-        while batch.members:
-            delay = min(batch.last + batch.idle, batch.first + batch.maximum)
-            delay -= asyncio.get_running_loop().time()
+        while batch.members and not batch.done.is_set():
+            previous = self._running.get(batch.key)
+            if previous is not None and not previous.done.is_set():
+                # Keep this same batch open for the entire judgment, generation
+                # and sending period. Expired deadlines must not split a backlog.
+                await previous.done.wait()
+                continue
+            delay = (
+                0
+                if batch.mentioned
+                else min(batch.last + batch.idle, batch.first + batch.maximum)
+                - asyncio.get_running_loop().time()
+            )
             if delay <= 0:
                 break
             batch.changed.clear()
@@ -158,10 +165,11 @@ class MessageBatcher:
                 await asyncio.wait_for(batch.changed.wait(), timeout=delay)
             except TimeoutError:
                 pass
-        if batch.members:
+        if batch.members and not batch.done.is_set():
             # The latest event carries the most recent platform reply token and
             # naturally remains the final user message of the shared request.
             batch.owner = batch.members[-1]
+            self._running[batch.key] = batch
         batch.ready.set()
         if self._heads.get(batch.key) is batch:
             self._heads.pop(batch.key, None)
@@ -191,6 +199,8 @@ class MessageBatcher:
                 member.clean()
         batch.done.set()
         batch.ready.set()
+        if self._running.get(batch.key) is batch:
+            self._running.pop(batch.key, None)
         self._active.discard(batch)
         if batch.timer is not None and not batch.timer.done():
             batch.timer.cancel()

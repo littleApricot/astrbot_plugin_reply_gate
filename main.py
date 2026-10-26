@@ -196,7 +196,7 @@ class ReplyGate(Star):
             event.stop_event()
             raise
         except Exception as exc:
-            self.logger.error("回复判断并行历史准备失败：%s", type(exc).__name__)
+            self.logger.error("回复判断历史准备失败：%s", type(exc).__name__)
             event.stop_event()
             return
         event.set_extra("reply_gate_batch_expanded", True)

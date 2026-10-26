@@ -60,38 +60,47 @@ class BatchingTests(unittest.IsolatedAsyncioTestCase):
         for e in events:
             e.cleanup_temporary_local_files()
 
-    async def test_new_batch_starts_while_previous_reply_is_still_running(
+    async def test_backlog_keeps_merging_until_previous_reply_finishes(
         self,
     ):
         active = event()
         original = await self.batcher.join(active, 0, 0)
         new_events = [event() for _ in range(5)]
-        tasks = [
-            asyncio.create_task(self.batcher.join(e, 0.02, 0.04)) for e in new_events
-        ]
-        await asyncio.sleep(0.07)
-        self.assertTrue(all(t.done() for t in tasks))
+        tasks = []
+        for e in new_events:
+            tasks.append(asyncio.create_task(self.batcher.join(e, 0.02, 0.04)))
+            await asyncio.sleep(0.05)
+        self.assertTrue(all(not t.done() for t in tasks))
         self.assertEqual(len(self.batcher._active), 2)
         self.assertFalse(original.batch.done.is_set())
+        active.cleanup_temporary_local_files()
         members = await asyncio.wait_for(asyncio.gather(*tasks), 0.3)
         self.assertEqual(len(members[0].batch.members), 5)
         self.assertTrue(all(m.batch is members[0].batch for m in members))
         self.assertIs(members[-1].batch.owner, members[-1])
         for e in new_events:
             e.cleanup_temporary_local_files()
-        self.assertFalse(original.batch.done.is_set())
-        active.cleanup_temporary_local_files()
+        self.assertTrue(original.batch.done.is_set())
+        self.assertEqual(self.batcher._running, {})
 
-    async def test_many_ready_batches_have_no_parallel_limit(self):
-        events = [event() for _ in range(32)]
-        members = []
-        for e in events:
-            members.append(await asyncio.wait_for(self.batcher.join(e, 0, 0), 0.2))
-        self.assertEqual(len({m.batch for m in members}), 32)
-        self.assertEqual(len(self.batcher._active), 32)
-        for e in reversed(events):
-            e.cleanup_temporary_local_files()
+    async def test_cancelled_backlog_releases_its_media_and_allows_next_batch(self):
+        active, waiting, next_event = event(), event(), event()
+        await self.batcher.join(active, 0, 0)
+        pending = asyncio.create_task(self.batcher.join(waiting, 0, 0))
+        await asyncio.sleep(0)
+        pending.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await pending
+        waiting.cleanup_temporary_local_files()
+        self.assertEqual(waiting.cleanups, ["cleaned"])
+        next_task = asyncio.create_task(self.batcher.join(next_event, 0, 0))
+        await asyncio.sleep(0)
+        self.assertFalse(next_task.done())
+        active.cleanup_temporary_local_files()
+        await asyncio.wait_for(next_task, 0.2)
+        next_event.cleanup_temporary_local_files()
         self.assertEqual(self.batcher._active, set())
+        self.assertEqual(self.batcher._running, {})
 
     async def test_different_sessions_collect_independently(self):
         first, other = event("a"), event("b")
@@ -161,9 +170,14 @@ class BatchingTests(unittest.IsolatedAsyncioTestCase):
         previous, at_event = event(), event()
         old = await self.batcher.join(previous, 0, 0)
         self.assertTrue(self.batcher.begin(old))
-        at = await self.batcher.join(at_event, 60, 60, immediate=True)
+        task = asyncio.create_task(
+            self.batcher.join(at_event, 60, 60, immediate=True)
+        )
+        await asyncio.sleep(0.02)
+        self.assertFalse(task.done())
+        previous.cleanup_temporary_local_files()
+        at = await asyncio.wait_for(task, 0.2)
         self.assertIsNot(old.batch, at.batch)
         self.assertEqual(at.batch.members, [at])
         at_event.cleanup_temporary_local_files()
-        self.assertFalse(old.batch.done.is_set())
-        previous.cleanup_temporary_local_files()
+        self.assertTrue(old.batch.done.is_set())
