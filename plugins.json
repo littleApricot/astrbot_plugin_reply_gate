@@ -2,7 +2,7 @@
   "$meta": {
     "schema_version": 1,
     "name": "littleApricot AstrBot Plugins",
-    "version": "v0.9.0",
+    "version": "v0.9.1",
     "description": "littleApricot AstrBot 插件发布源",
     "repository": "https://github.com/littleApricot/astrbot_plugin_reply_gate"
   },
@@ -10,10 +10,10 @@
     "author": "littleApricot",
     "name": "astrbot_plugin_reply_gate",
     "display_name": "回复判断",
-    "desc": "同会话串行判断与回复，期间新消息合为下一批，@ 必回，保留完整记忆与最新有效历史。",
-    "version": "v0.9.0",
+    "desc": "同会话串行判断与回复，期间新消息合为下一批，@ 必回，判断与回复共享本批历史快照，保留完整回复窗口。",
+    "version": "v0.9.1",
     "repo": "https://github.com/littleApricot/astrbot_plugin_reply_gate",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_reply_gate/archive/refs/tags/v0.9.0.zip",
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_reply_gate/archive/refs/tags/v0.9.1.zip",
     "astrbot_version": ">=4.29.1,<4.30.0"
   },
   "littleApricot/astrbot_plugin_meme_library": {
@@ -61,10 +61,10 @@
     "name": "astrbot_plugin_lcm",
     "display_name": "LCM 上下文与历史",
     "desc": "统一提示来源与有效历史，完整存档、分层压缩、历史图片预算及原图查回。",
-    "version": "v0.6.6",
+    "version": "v0.6.7",
     "repo": "https://github.com/littleApricot/astrbot_plugin_lcm",
     "astrbot_version": ">=4.29.1,<4.30.0",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_lcm/archive/refs/tags/v0.6.6.zip"
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_lcm/archive/refs/tags/v0.6.7.zip"
   },
   "littleApricot/astrbot_plugin_voice_reply": {
     "author": "littleApricot",

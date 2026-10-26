@@ -10,6 +10,7 @@ from unittest.mock import patch
 from astrbot.core.agent.message import Message
 from astrbot.core.pipeline.process_stage.method.agent_sub_stages import internal
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
+
 from astrbot_plugin_reply_gate.parallel_runtime import ParallelRuntime
 
 
@@ -56,6 +57,36 @@ class ParallelRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         with patch.object(self.runtime.bridge, "register"):
             internal.register_active_runner(event.unified_msg_origin, runner)
+
+    async def test_judgment_snapshot_stays_fixed_without_lcm_and_next_batch_refreshes(self):
+        first, later = make_event(), make_event()
+        self.runtime.enter(first)
+        try:
+            req = ProviderRequest(
+                prompt="admitted input",
+                contexts=copy.deepcopy(self.saved),
+                conversation=SimpleNamespace(cid="conv", token_usage=0),
+            )
+            await self.runtime.prepare(first, req, len(req.contexts))
+            await self.runtime.refresh_request(first, req)
+            frozen = copy.deepcopy(req.contexts)
+            self.saved.append({"role": "user", "content": "arrived after judgment"})
+            await self.runtime.refresh_request(first, req)
+            self.assertEqual(req.contexts, frozen)
+            self.assertIn("arrived after judgment", str(self.saved))
+            first.cleanup_temporary_local_files()
+            self.runtime.enter(later)
+            next_req = ProviderRequest(
+                prompt="next input",
+                contexts=copy.deepcopy(self.saved),
+                conversation=SimpleNamespace(cid="conv", token_usage=0),
+            )
+            await self.runtime.prepare(later, next_req, len(next_req.contexts))
+            await self.runtime.refresh_request(later, next_req)
+            self.assertIn("arrived after judgment", str(next_req.contexts))
+        finally:
+            later.cleanup_temporary_local_files()
+            first.cleanup_temporary_local_files()
 
     async def test_native_locks_serialize_batches_and_other_events(
         self,

@@ -222,6 +222,20 @@ class ReplyGate(Star):
             if not previous["reply"]:
                 event.stop_event()
             return
+        if batch is not None:
+            try:
+                # Pin before every admission path, including @ and activity=1.
+                await self._parallel.refresh_request(event, req)
+            except asyncio.CancelledError:
+                event.stop_event()
+                raise
+            except Exception as exc:
+                self.logger.error(
+                    "回复判断上下文固定失败：%s；启用 LCM 时请同时更新至 v0.6.7 或更新版本",
+                    type(exc).__name__,
+                )
+                event.stop_event()
+                return
         conversation = getattr(req.conversation, "cid", "")
         balance_key = (event.unified_msg_origin, str(conversation))
         if (batch is not None and batch.mentioned) or any(
@@ -269,7 +283,8 @@ class ReplyGate(Star):
             else:
                 decision_source = MODEL
                 timeout = float(self.config.get("timeout_seconds", 30))
-                await self._parallel.refresh_request(event, req)
+                if batch is None:
+                    await self._parallel.refresh_request(event, req)
                 history, current = await build_input(self.context, event, req)
                 memory = event.get_extra("reply_gate_memory", "")
                 # Only this detached decision window is trimmed. AstrBot retains

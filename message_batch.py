@@ -57,6 +57,9 @@ class MessageBatch:
     group_duplicates: set[str] = field(default_factory=set)
     mentioned: bool = False
     judging: bool = False
+    # LCM and the standalone history bridge pin the admitted batch's history
+    # before judgment; queued events remain owned by the next batch.
+    freeze_context: bool = True
 
     async def wait_other_handlers(self) -> None:
         """Wait until sibling pipelines have finished their message handlers."""

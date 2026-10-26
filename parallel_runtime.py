@@ -29,6 +29,7 @@ class ParallelRun:
     saved_outputs: list[dict] | None = None
     inputs: list[dict] = field(default_factory=list)
     request: object = None
+    frozen_history: list[dict] | None = None
 
 
 class _Bridge:
@@ -75,7 +76,11 @@ class _Bridge:
             async def step(self):
                 nonlocal boundary
                 tail = runner.run_context.messages[boundary:]
-                latest = await run.controller.history(event.unified_msg_origin, run.cid)
+                latest = run.frozen_history
+                if latest is None:
+                    latest = await run.controller.history(
+                        event.unified_msg_origin, run.cid
+                    )
                 runner.run_context.messages = (
                     systems + bind(without_inputs(latest, run.inputs)) + owned + tail
                 )
@@ -287,11 +292,20 @@ class ParallelRuntime:
         observer = getattr(manager, "_lcm_history_bridge", None)
         if observer is not None and getattr(observer, "active", False):
             await observer.refresh_request(event, req)
+            state = event.get_extra("lcm_prepared")
+            batch = event.get_extra("reply_gate_batch")
+            if getattr(batch, "freeze_context", False) and (
+                not state or state.get("frozen_base") is None
+            ):
+                raise ValueError("lcm_batch_snapshot_unavailable")
             return
         run = event.get_extra("reply_gate_parallel")
         if run is None or not run.cid:
             return
-        latest = await self.history(event.unified_msg_origin, run.cid)
+        latest = run.frozen_history
+        if latest is None:
+            latest = await self.history(event.unified_msg_origin, run.cid)
+            run.frozen_history = copy.deepcopy(latest)
         batch = event.get_extra("reply_gate_batch")
         req.contexts = without_inputs(latest, run.inputs)
         if batch is not None:
