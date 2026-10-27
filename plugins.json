@@ -41,9 +41,9 @@
     "name": "astrbot_plugin_silence",
     "display_name": "沉默工具",
     "desc": "让模型随时选择结束当前轮，可直接沉默或在任意工具操作后停止回复。",
-    "version": "v0.1.1",
+    "version": "v0.1.2",
     "repo": "https://github.com/littleApricot/astrbot_plugin_silence",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_silence/archive/refs/tags/v0.1.1.zip",
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_silence/archive/refs/tags/v0.1.2.zip",
     "astrbot_version": ">=4.29.1,<4.30.0"
   },
   "littleApricot/astrbot_plugin_usage_insight": {
