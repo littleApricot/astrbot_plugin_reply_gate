@@ -9,6 +9,25 @@ from zoneinfo import ZoneInfo
 from astrbot.core.agent.message import bind_checkpoint_messages
 
 
+def context_policy(context):
+    lookup = getattr(context, "get_registered_star", None)
+    star = lookup("astrbot_plugin_tool_prompts") if callable(lookup) else None
+    plugin = getattr(star, "star_cls", None)
+    method = getattr(plugin, "model_context_policy", None)
+    return (
+        method()
+        if callable(method)
+        and getattr(star, "activated", True)
+        and getattr(plugin, "config", {}).get("enabled", True)
+        else None
+    )
+
+
+def decision_memory(context, event, fallback=""):
+    policy = context_policy(context)
+    return policy.decision_memory(event, fallback) if policy else fallback
+
+
 async def memory_snapshot(context, event, req):
     """Resolve only the selected persona; the memory plugin refreshes this later."""
     manager = getattr(context, "persona_manager", None)
@@ -70,12 +89,18 @@ async def project_message(message, resolver=None):
 async def build_input(context, event, req):
     resolver = image_resolver(context)
     history = []
-    for message in bind_checkpoint_messages(copy.deepcopy(req.contexts or [])):
+    sources = copy.deepcopy(req.contexts or [])
+    policy = context_policy(context)
+    if policy:
+        sources = [message for _, message in policy.history_entries(sources)]
+    for message in bind_checkpoint_messages(sources):
         if message.role in ("user", "assistant", "tool"):
             history.append(await project_message(message.model_dump(), resolver))
     # Extra parts can contain catalogs, recommendations and operational prompts.
     # Quoted messages are actual chat data and are the sole text-extra exception.
     detached = copy.copy(req)
+    detached.system_prompt = ""
+    detached.func_tool = None
     detached.extra_user_content_parts = []
     for part in req.extra_user_content_parts or []:
         raw = part if isinstance(part, dict) else part.model_dump()

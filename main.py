@@ -23,7 +23,7 @@ from .batch_context import (
     prepare_past_messages,
     remove_duplicate_group_records,
 )
-from .decision_input import build_input, memory_snapshot
+from .decision_input import build_input, decision_memory, memory_snapshot
 from .message_batch import MessageBatcher, merge_delays
 from .parallel_runtime import ParallelRuntime
 from .shared_context import (
@@ -286,7 +286,9 @@ class ReplyGate(Star):
                 if batch is None:
                     await self._parallel.refresh_request(event, req)
                 history, current = await build_input(self.context, event, req)
-                memory = event.get_extra("reply_gate_memory", "")
+                memory = decision_memory(
+                    self.context, event, event.get_extra("reply_gate_memory", "")
+                )
                 # Only this detached decision window is trimmed. AstrBot retains
                 # ownership of the original request, context limits and persistence.
                 window, payload = fit_context(

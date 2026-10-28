@@ -2,7 +2,7 @@
   "$meta": {
     "schema_version": 1,
     "name": "littleApricot AstrBot Plugins",
-    "version": "v0.9.1",
+    "version": "v0.9.2",
     "description": "littleApricot AstrBot 插件发布源",
     "repository": "https://github.com/littleApricot/astrbot_plugin_reply_gate"
   },
@@ -11,9 +11,9 @@
     "name": "astrbot_plugin_reply_gate",
     "display_name": "回复判断",
     "desc": "同会话串行判断与回复，期间新消息合为下一批，@ 必回，判断与回复共享本批历史快照，保留完整回复窗口。",
-    "version": "v0.9.1",
+    "version": "v0.9.2",
     "repo": "https://github.com/littleApricot/astrbot_plugin_reply_gate",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_reply_gate/archive/refs/tags/v0.9.1.zip",
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_reply_gate/archive/refs/tags/v0.9.2.zip",
     "astrbot_version": ">=4.29.1,<4.30.0"
   },
   "littleApricot/astrbot_plugin_meme_library": {
@@ -21,9 +21,9 @@
     "name": "astrbot_plugin_meme_library",
     "display_name": "群聊表情图库",
     "desc": "自动收集群聊图片，维护名称和简短描述，支持看图选择、用法纠正、停用及原图路径读取。",
-    "version": "v0.6.3",
+    "version": "v0.6.4",
     "repo": "https://github.com/littleApricot/astrbot_plugin_meme_library",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_meme_library/archive/refs/tags/v0.6.3.zip",
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_meme_library/archive/refs/tags/v0.6.4.zip",
     "astrbot_version": ">=4.29.1,<4.30.0"
   },
   "littleApricot/astrbot_plugin_self_prompt": {
@@ -31,9 +31,9 @@
     "name": "astrbot_plugin_self_prompt",
     "display_name": "记忆与记事本",
     "desc": "人设、回复偏好与聊天示例由用户维护，机器人可主动维护昵称、自我认知和记事本，连续未修改时临时提醒。",
-    "version": "v0.8.1",
+    "version": "v0.8.2",
     "repo": "https://github.com/littleApricot/astrbot_plugin_self_prompt",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_self_prompt/archive/refs/tags/v0.8.1.zip",
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_self_prompt/archive/refs/tags/v0.8.2.zip",
     "astrbot_version": ">=4.29.1,<4.30.0"
   },
   "littleApricot/astrbot_plugin_silence": {
@@ -61,10 +61,10 @@
     "name": "astrbot_plugin_lcm",
     "display_name": "LCM 上下文与历史",
     "desc": "统一提示来源与有效历史，完整存档、分层压缩、历史图片预算及原图查回。",
-    "version": "v0.6.9",
+    "version": "v0.7.0",
     "repo": "https://github.com/littleApricot/astrbot_plugin_lcm",
     "astrbot_version": ">=4.29.1,<4.30.0",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_lcm/archive/refs/tags/v0.6.9.zip"
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_lcm/archive/refs/tags/v0.7.0.zip"
   },
   "littleApricot/astrbot_plugin_voice_reply": {
     "author": "littleApricot",
@@ -79,11 +79,11 @@
   "littleApricot/astrbot_plugin_tool_prompts": {
     "author": "littleApricot",
     "name": "astrbot_plugin_tool_prompts",
-    "display_name": "工具说明编辑",
-    "desc": "统一管理插件、MCP 开关及内置工具原功能配置，自定义模型看到的工具及参数说明，支持恢复默认。",
-    "version": "v0.3.1",
+    "display_name": "工具管理",
+    "desc": "统一管理工具开关、说明和上下文位置，配合 LCM 组装请求，隔离判断与整理资料。",
+    "version": "v0.4.0",
     "repo": "https://github.com/littleApricot/astrbot_plugin_tool_prompts",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_tool_prompts/archive/refs/tags/v0.3.1.zip",
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_tool_prompts/archive/refs/tags/v0.4.0.zip",
     "astrbot_version": ">=4.29.1,<4.30.0"
   }
 }

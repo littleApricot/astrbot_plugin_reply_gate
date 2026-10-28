@@ -1,7 +1,7 @@
 name: astrbot_plugin_reply_gate
 display_name: 回复判断
 desc: 同会话串行判断与回复，期间新消息合为下一批，@ 必回，判断与回复共享本批历史快照，保留完整回复窗口。
-version: v0.9.1
+version: v0.9.2
 author: littleApricot
 repo: https://github.com/littleApricot/astrbot_plugin_reply_gate
 astrbot_version: ">=4.29.1,<4.30.0"
